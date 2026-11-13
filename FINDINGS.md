@@ -7,9 +7,9 @@ posts, listings and tasks; [`harness/`](harness/README.md)). The changes that ad
 [CHANGES-EXPERIMENT.md](CHANGES-EXPERIMENT.md); what the changes did for agents is in
 [results/BENCHMARK.md](results/BENCHMARK.md).
 
-**Upstream links are added when each item is filed.** Nothing is filed yet. A minimal public reproduction for F1, F2 and
-F5 is at [isokron-ai/payload-mcp-repro](https://github.com/isokron-ai/payload-mcp-repro); like this repository, it stays
-private until the day the first upstream item is filed.
+**Upstream links are added when each item is filed.** The first four were filed on 13 Nov 2026 (table below). A minimal
+public reproduction for F1, F2 and F5 is at [isokron-ai/payload-mcp-repro](https://github.com/isokron-ai/payload-mcp-repro),
+public since 13 Nov 2026.
 
 How to read the tables:
 
@@ -52,10 +52,10 @@ Filed in this order, at most two new threads a day. Each line gets its link and 
 
 | Item | What | Findings | Link |
 |---|---|---|---|
-| U | Issue: update and delete tools write through document locks, and partial bulk failures report success; asks whether 3.x fixes are wanted | F1, F2, F5 (context: F7, F8; cites #19435) | [link added when filed] |
-| C1 | Comment on #19435 with the measured reproduction | F6 (not ours) | [link added when filed] |
-| D2 | Discussion: should the MCP tools respect document locks by default? | F1, F2 | [link added when filed] |
-| PR-2 | `fix(plugin-mcp): set isError when bulk delete has errors` (main) | F5 | [link added when filed] |
+| U | Issue: update and delete tools write through document locks, and partial bulk failures report success; asks whether 3.x fixes are wanted | F1, F2, F5 (context: F7, F8; cites #19435) | [#19591](https://github.com/payloadcms/payload/issues/19591), 13 Nov 2026 |
+| C1 | Comment on #19435 with the measured reproduction | F6 (not ours) | [comment on #19435](https://github.com/payloadcms/payload/issues/19435#issuecomment-6865889103), 13 Nov 2026 |
+| D2 | Discussion: should the MCP tools respect document locks by default? | F1, F2 | [#19597](https://github.com/payloadcms/payload/discussions/19597), 13 Nov 2026 |
+| PR-2 | `fix(plugin-mcp): set isError when deleteDocuments fails or partly fails` (main) | F5 | [#19592](https://github.com/payloadcms/payload/pull/19592), 13 Nov 2026 |
 | D1 | Discussion (v4 ideas): a guard on match-all `where` in update and delete | F3 | [link added when filed] |
 | PR-1 | `fix(plugin-mcp): respect document locks in update and delete tools` (main) | F1, F2 | [link added when filed] |
 | PR-3 | `fix(plugin-mcp): refuse an empty where unless all is true` (main), only if maintainers agree in D1 | F3 | [link added when filed] |
