@@ -21,7 +21,7 @@ Per-commit details: [CHANGES-EXPERIMENT.md](CHANGES-EXPERIMENT.md). Numbers: [re
 | upstream | `upstream-v3.93.0` | `@payloadcms/plugin-mcp` 3.93.0, unmodified (the benchmark's baseline runs the npm package) | the baseline of every comparison |
 | research v1 | `research-v1-v3.93.0` | patches 0001-0005 | **the benchmarked build**: 144 agent runs against the baseline, plus regression probes |
 | research v2 | `research-v2-v3.93.0` | v1 + patch 0006 (batch-friendly preconditions) | a short agent series, v2 against v1 as a same-day control (39 graded runs in all), and probes. **It restored batching but lost the other writer's change in 6 of 9 conflict-guard runs. Do not use it.** |
-| research v2.1 | `research-v2.1-v3.93.0` | v2 + patch 0007 (the read memory survives `select`) | **probe-verified only.** The probes show the v2 hole closed (5 of 5) and every earlier probe holding. No agent series has run on v2.1 yet |
+| research v2.1 | `research-v2.1-v3.93.0` | v2 + patch 0007 (the read memory survives `select`) | probes and a 60-run agent series, v2.1 against v1 as a same-day control. **It keeps v2's batching (U11 10/10, A5 5/5) and kept the other writer's change in 15 of 15 conflict-guard runs.** The probes show the v2 hole closed (5 of 5) and every earlier probe holding |
 
 `packages/plugin-mcp` on `main` is research v2.1. The v2 regression and the v2.1 fix are written up in
 [results/BATCHING-FIX.md](results/BATCHING-FIX.md), including the runs that went wrong.
@@ -130,9 +130,10 @@ write.
 - **v2 also reopened a lost update:** in 6 of 9 conflict-guard runs (A4, U9) the other writer's change was lost with no
   signal. All six runs read the post with a narrow `select`, which hid the document from the read-version memory. v1's
   instruction to pass `ifUpdatedAt` had covered that hole; v2 removed the instruction.
-- **v2.1 fixes that hole in the probes only** (E12: written 5 of 5 on v2, refused 5 of 5 on v2.1; every earlier probe
-  still holds). No agent series has run on v2.1, so nothing here claims how agents do on it. The next series should be
-  v2.1 on U11, A5, A3, A4, U9 and U8.
+- **v2.1 fixes that hole** in the probes (E12: written 5 of 5 on v2, refused 5 of 5 on v2.1; every earlier probe
+  still holds) and with agents: Opus on v2.1 against v1, 5 runs per task, batched U11 10/10 and A5 5/5 (v1 0/10, 0/5)
+  and kept the other writer's change in 15 of 15 conflict-guard runs (A4, U9, U8), every first write refused by the
+  server with no `ifUpdatedAt` from the agent. Calls fall (U11 8 to 4, A5 3 to 2); tokens per run do not.
 
 ## Build and compare
 

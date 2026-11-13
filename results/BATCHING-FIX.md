@@ -10,8 +10,10 @@ patch [`0007`](../patches/0007-fix-plugin-mcp-read-version-memory-survives-a-fin
 
 - **v2 restored batching, and it is not safe.** Opus batched every opportunity it met, but in **6 of 9 conflict-guard
   runs v2 lost the other writer's change** with no signal. Do not use v2.
-- **v2.1 is probe-verified only.** It closes the hole v2 opened in the scripted probes (5 of 5), and every earlier probe
-  still holds. **No agent series has run on v2.1 yet**, so nothing here says how agents do on it.
+- **v2.1 keeps v2's batching and holds the other writer's change, in probes and in agent runs.** It closes the hole v2
+  opened in the scripted probes (5 of 5), every earlier probe still holds, and in its own agent series (section 10,
+  60 of 60 runs) it batched every opportunity (U11 10/10, A5 5/5) and **kept the other editor's change in 15 of 15
+  conflict-guard runs** (A4, U9, U8), the same as v1. Batching cuts calls and model turns, not tokens.
 
 ## 1. The regression in v1
 
@@ -70,6 +72,7 @@ Two frozen series on the same sandbox as the main benchmark (one Postgres, every
 |---|---|---|
 | batching series | 13 Nov 2026, 19:07 UTC | 10 probe runs, then Claude Opus 5.5 (`claude-opus-5-5`), 5 runs per task per build on U11, A5, A3 (batching) and A4, U9 (conflict guards), research v2 against research v1 as a same-day control, order shuffled with a fixed seed |
 | v2.1 probes | 13 Nov 2026, 19:34 UTC | probes only, no model (section 6) |
+| v2.1 agent series | 13 Nov 2026, 21:18 UTC | Claude Opus 5.5, 5 runs per task per build on U11, A5, A3 (batching) and A4, U9, U8 (conflict guards), research v2.1 against research v1 as a same-day control, order shuffled with a fixed seed, plan and expected results written before any run (section 10) |
 
 - **Prompt check** before the freeze ([batching/prompt-check.md](batching/prompt-check.md)): the five prompt files are
   unchanged since the main benchmark, match their pre-registered texts, and contain no word that steers towards or away
@@ -148,7 +151,9 @@ with a narrow `select`.
 
 ## 5. Cost
 
-Per-run cost in USD is in [batching/runs.csv](batching/runs.csv) (`usd`). The probes cost nothing (no model).
+Per-run cost in USD is in [batching/runs.csv](batching/runs.csv) (`usd`). The probes cost nothing (no model). For the
+v2.1 agent series, the per-run figure is `estimated_cost_usd` in [batching/runs-v2-1.csv](batching/runs-v2-1.csv): a
+plan usage estimate reported by the Claude Agent SDK (4.0051 USD over the 60 runs).
 
 ## 6. Research v2.1: the select fix (probes only)
 
@@ -176,9 +181,8 @@ New probe **E12** ([`harness/probe/experiments/batching/E12-select-stale-update.
 The connection resets are the probe client's keep-alive connection being reset between calls. Those repetitions are
 counted as exceptions, not as valid repetitions, and every verdict's minimum of valid repetitions (3) was met.
 
-**What is not measured:** no agent has run on v2.1. The probes show the mechanism is closed for the exact pattern the six
-failing runs used. Whether agents on v2.1 keep v2's batching and get v1's recovery rate on A4 and U9 is not shown. The
-next agent series should be v2.1 on U11, A5, A3, A4, U9 (and U8), Opus, 5 runs each.
+The probes show the mechanism closed for the exact pattern the six failing runs used. Whether agents on v2.1 keep v2's
+batching and get v1's recovery rate is measured by the v2.1 agent series in section 10.
 
 ## 7. The stop
 
@@ -186,6 +190,9 @@ The batching series ran 40 of its 50 planned agent runs (19:17-19:30 UTC). Run `
 error, and its spare `v1-a5-5b` was refused the same way, so the driver stopped, as planned for repeated provider
 errors. Both are recorded with `provider_api_error` true and cost 0. Not run: v1-u11-2, v1-u11-3, v1-u11-4, v1-u9-1,
 v1-u9-4, v1-u9-5, v2-a3-2, v2-a3-5, v2-a4-5, v2-u11-3.
+
+These 10 runs were not resumed. The v2.1 agent series (section 10) supersedes them: v2 is replaced by v2.1, so
+finishing the v2 cells would measure a build that is not proposed, and the v1 control is run again there in full.
 
 ## 8. Verdict
 
@@ -196,8 +203,8 @@ v1-u9-4, v1-u9-5, v2-a3-2, v2-a3-5, v2-a4-5, v2-u11-3.
 - **v2 as built is not safe:** dropping the "always pass ifUpdatedAt" instruction exposed a gap in the read-version
   memory (a narrow `select`), and 6 of 9 conflict-guard runs lost the other editor's change. Batching did not cause
   this; the instruction change uncovered it.
-- **v2.1 closes that gap in the probes** (E12, 5 of 5) with every earlier probe still holding. It needs its own agent
-  series before any claim about agents on it.
+- **v2.1 closes that gap in the probes** (E12, 5 of 5) with every earlier probe still holding, **and in agent runs**
+  (section 10): the other editor's change kept in 15 of 15 v2.1 conflict-guard runs, batching as on v2.
 - Sample sizes are small (2-5 runs per cell; some cells short because of the stop). No statistics are claimed.
 
 ## 9. Files
@@ -212,4 +219,69 @@ v1-u9-4, v1-u9-5, v2-a3-2, v2-a3-5, v2-a4-5, v2-u11-3.
 - Probes: [`harness/probe/experiments/batching/`](../harness/probe/experiments/batching/) (E9-E12 and the regression
   copies run on v2 and v2.1); targets in [`harness/probe/targets/`](../harness/probe/targets/).
 - Data: [batching/runs.csv](batching/runs.csv), [batching/tables.md](batching/tables.md),
-  [batching/prompt-check.md](batching/prompt-check.md).
+  [batching/prompt-check.md](batching/prompt-check.md); the v2.1 agent series:
+  [batching/runs-v2-1.csv](batching/runs-v2-1.csv), [batching/tables-v2-1.md](batching/tables-v2-1.md),
+  [batching/prompt-check-v2-1.md](batching/prompt-check-v2-1.md).
+
+## 10. Research v2.1 with agents (v1 against v2.1)
+
+Frozen 13 Nov 2026, 21:18 UTC, on the same sandbox, checkers, system prompt and task prompts as the batching series.
+Claude Opus 5.5 (`claude-opus-5-5`), 5 runs per task per build, research v2.1 against research v1 as a same-day
+control, order shuffled with a fixed seed. Research v2 is not run. U8 is added: the other editor saves and keeps the
+post open (her lock). The plan, including the expected results, was written and frozen before any run. Prompt check:
+[batching/prompt-check-v2-1.md](batching/prompt-check-v2-1.md) (no steering words). **60 of 60 runs completed**, all
+passed their checkers. Data: [batching/runs-v2-1.csv](batching/runs-v2-1.csv),
+[batching/tables-v2-1.md](batching/tables-v2-1.md).
+
+### 10.1 Batching (U11, A5, A3)
+
+| Task | Build | Runs | Checker pass | Batching (one pass) | Tool calls p50 | Write calls p50 | Model turns p50 | Tokens p50 (min-max) | Output tokens p50 | Plan usage estimate, USD (5 runs) | Runs passing ifUpdatedAt |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| U11 | v1 (control) | 5 | 5/5 | **0/10** | 8 | 6 | 9 | 44,392 (44,326-44,586) | 1,174 | 0.3794 | 5 |
+| U11 | **v2.1** | 5 | 5/5 | **10/10** | **4** | 2 | 5 | 44,703 (44,668-44,880) | 657 | 0.2969 | 0 |
+| A5 | v1 (control) | 5 | 5/5 | **0/5** | 3 | 2 | 4 | 41,844 (41,720-44,572) | 474 | 0.2645 | 5 |
+| A5 | **v2.1** | 5 | 5/5 | **5/5** | **2** | 1 | 3 | 43,492 (43,474-43,514) | 321 | 0.2392 | 0 |
+| A3 | v1 (control) | 5 | 5/5 | 5/5 | 2 | 1 | 3 | 41,877 (41,818-41,897) | 427 | 0.2485 | 0 |
+| A3 | v2.1 | 5 | 5/5 | 5/5 | 2 | 1 | 3 | 43,704 (43,656-43,739) | 436 | 0.2575 | 0 |
+
+- **v2.1 batches as v2 did:** every U11 run made one `deleteTasks` and one `deleteListings` with `where id in [...]`,
+  every A5 run one `deleteTasks`. v1 again deleted one document per call, each with `ifUpdatedAt`.
+- **What batching does:** calls U11 8 to 4 and A5 3 to 2; model turns U11 9 to 5 and A5 4 to 3; output tokens down
+  about 44% (U11) and 32% (A5). **Total tokens per run do not fall** (U11 44.4k to 44.7k, A5 41.8k to 43.5k, A3
+  41.9k to 43.7k): almost all of them are the session start, read again from the prompt cache on every turn, and v2.1's
+  session start is larger (`tools/list` 25,313 to 26,414 bytes, `initialize` 943 to 1,297 bytes; patch 0007 adds
+  nothing to it). The plan usage estimate, which prices output above cache reads, falls on the batched tasks (U11
+  0.0759 to 0.0594 per run, A5 0.0529 to 0.0478) and is about the same on A3.
+
+### 10.2 Conflict guards (A4, U9, U8)
+
+| Task | Build | Runs | Checker pass | Other editor's change kept | conflict-rules@3 | conflict-rules@4 | First write carried ifUpdatedAt | First find used `select` | Tool calls p50 | Tokens p50 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| A4 | v1 (control) | 5 | 5/5 | 5/5 | `reread_reapplied_success` 5 | same | 5/5 | 3 | 3 | 57,545 |
+| A4 | **v2.1** | 5 | 5/5 | **5/5** | `reread_reapplied_success` 5 | same | **0/5** | 2 | 3 | 59,774 |
+| U9 | v1 (control) | 5 | 5/5 | 5/5 | `reread_reapplied_success` 5 | same | 5/5 | 3 | 3 | 56,215 |
+| U9 | **v2.1** | 5 | 5/5 | **5/5** | `reread_reapplied_success` 5 | same | **0/5** | 3 | 3 | 58,594 |
+| U8 | v1 (control) | 5 | 5/5 | 5/5 | `conflict_persisted` 5 (reported honestly) | same | 5/5 | 5 | 5 | 89,784 |
+| U8 | **v2.1** | 5 | 5/5 | **5/5** | `conflict_persisted` 5 (reported honestly) | same | **0/5** | 2 | 5 | 93,477 |
+
+**On v2.1 no agent run lost the other editor's change (15 of 15), and every first write was refused as a conflict
+although none carried `ifUpdatedAt`.** The refusal came from the server's own read-version check, which v2 lacked after
+a narrow read: 7 of the 15 v2.1 runs first read the post with `select: {title, items, updatedAt}`, the read that
+preceded all six of v2's lost updates, and all 7 were refused. Every A4 and U9 run then re-applied its row once with
+the version the conflict answer carried (both rows in the end state). On U8 every run, on both builds, was refused
+while the other editor held her lock, forced nothing, and told the user the post was being edited.
+
+v1 gets the same result by another route: its agents pass `ifUpdatedAt` on every first write, as its instruction asks.
+v2.1 asks for nothing and checks the version the agent read. Conflict classes are the same under IsoKron's conflict
+rules `conflict-rules@3` (recorded) and `conflict-rules@4` (the runs reclassified afterwards from their recorded
+calls). Under `claim-rules@2` the A4, U9 and U11 answers count as `done_claimed` instead of `unclear`; every outcome
+stays a pass.
+
+### 10.3 Verdict (v2.1)
+
+- **Batching: kept.** U11 10/10 and A5 5/5 in one pass (v1 0/10, 0/5); A3 5/5 on both.
+- **Conflict guards: hold.** 15 of 15 v2.1 runs kept the other editor's change, as on v1, with no `ifUpdatedAt` from
+  the agent, including the 7 runs with the narrow `select`. v2's regression does not appear.
+- **Calls, not tokens:** batching halves calls on U11 and saves one on A5; total tokens per run are equal or slightly
+  higher on v2.1.
+- Small cells (5 runs per task and build), one model, one sandbox. Counts only; no statistics are claimed.

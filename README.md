@@ -4,7 +4,8 @@
 > collection tools write. It is not affiliated with or endorsed by Payload CMS, Inc. and is not a supported
 > distribution. On five pre-registered editing tasks, research build v1 completed 28 of 29 runs against 11 of 29 for
 > the unmodified plugin (Claude Opus 5.5 and a capture-off observer arm). The later v2 lost another editor's change in
-> 6 of 9 conflict runs, and v2.1, which fixes that, is probe-verified only. Read [EXPERIMENT.md](EXPERIMENT.md) first;
+> 6 of 9 conflict runs; v2.1 fixes that and kept the other editor's change in 15 of 15 agent conflict runs while
+> keeping v2's batching. Read [EXPERIMENT.md](EXPERIMENT.md) first;
 > the findings are in [FINDINGS.md](FINDINGS.md).
 
 # payload-mcp-writepath-experiment
@@ -18,7 +19,7 @@ results of the measurements.
     CHANGES-EXPERIMENT.md     every commit, its patch, files and what it addresses
     FINDINGS.md               the findings register and the upstream items
     results/BENCHMARK.md      vendor 3.93.0 vs research v1, corrected 13 Nov 2026
-    results/BATCHING-FIX.md   research v2 and v2.1: batching restored, a v2 regression, the v2.1 fix (probes only)
+    results/BATCHING-FIX.md   research v2 and v2.1: batching restored, a v2 regression, the v2.1 fix (probes and agents)
     harness/                  loopback sandbox (Payload 3.93.0 app, Postgres compose), tasks, checkers, probes
     harness/build/build.sh    check the upstream import and the patch series; rebuild the measured builds
     LICENSE.md, NOTICE        Payload's MIT licence; attribution
