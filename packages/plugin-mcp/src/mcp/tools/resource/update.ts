@@ -196,15 +196,15 @@ export const updateResourceTool = (
         .optional()
         .default(false)
         .describe('Required to update every document with an empty where clause'),
-      data: z
-        .object(fieldShape)
-        .partial()
-        .optional()
-        .describe(
-          colliding.length
-            ? `Document fields to write. Fields named ${colliding.join(', ')} can only be written here (the top-level names are operation arguments).`
-            : 'Document fields to write (alternative to passing them at the top level)',
-        ),
+      ...(colliding.length
+        ? {
+            data: z
+              .object(Object.fromEntries(colliding.map((k) => [k, fieldShape[k]!])))
+              .partial()
+              .optional()
+              .describe(`Document fields named ${colliding.join(', ')}: write them here (the top-level names are operation arguments).`),
+          }
+        : {}),
       depth: z.number().int().min(0).max(10).optional().default(0).describe('How many levels deep to populate relationships'),
       draft: z.boolean().optional().default(false).describe('Whether to update the document as a draft'),
       fallbackLocale: z
