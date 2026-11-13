@@ -215,6 +215,7 @@ Page: ${result.page} of ${result.totalPages}
     server.registerTool(
       `find${collectionSlug.charAt(0).toUpperCase() + toCamelCase(collectionSlug).slice(1)}`,
       {
+        annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false, readOnlyHint: true },
         description: `${collections?.[collectionSlug]?.description || toolSchemas.findResources.description.trim()}`,
         inputSchema: toolSchemas.findResources.parameters.shape,
       },
@@ -234,7 +235,8 @@ Page: ${result.page} of ${result.totalPages}
         trash,
         where,
       }) => {
-        return await tool(
+        // isError on every error answer of this tool: the texts are fixed, so mark them here.
+        const r = (await tool(
           id,
           limit,
           page,
@@ -249,7 +251,9 @@ Page: ${result.page} of ${result.totalPages}
           joins,
           trash,
           pagination,
-        )
+        )) as { content: Array<{ text: string; type: 'text' }>; isError?: boolean }
+        const t = r.content?.[0]?.text ?? ''
+        return /^(Error|❌)/.test(t) ? { ...r, isError: true } : r
       },
     )
   }

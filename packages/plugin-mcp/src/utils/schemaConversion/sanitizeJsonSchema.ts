@@ -10,12 +10,17 @@ import type { JSONSchema4 } from 'json-schema'
  * emits a Zod union which the MCP SDK serialises back as `anyOf`, stripping
  * the concrete `type` from the output and breaking schema introspection.
  */
-export function sanitizeJsonSchema(schema: JSONSchema4): JSONSchema4 {
-  delete schema?.properties?.id
+export function sanitizeJsonSchema(schema: JSONSchema4, isRoot = true): JSONSchema4 {
+  // C-rows (#19435): only the document's own id is internal. Array rows keep their optional `id`, so an
+  // agent can address an existing row (and keep its other-locale values) instead of replacing every row.
+  if (isRoot) {
+    delete schema?.properties?.id
+  }
   delete schema?.properties?.createdAt
   delete schema?.properties?.updatedAt
 
   if (Array.isArray(schema.required)) {
+    // ids stay optional everywhere: rows without an id are new rows
     schema.required = schema.required.filter((field) => field !== 'id')
     if (schema.required.length === 0) {
       delete schema.required
@@ -30,10 +35,10 @@ export function sanitizeJsonSchema(schema: JSONSchema4): JSONSchema4 {
       }
       normalizeNullableType(prop)
       if (prop.properties) {
-        sanitizeJsonSchema(prop)
+        sanitizeJsonSchema(prop, false)
       }
       if (prop.items && typeof prop.items === 'object' && !Array.isArray(prop.items)) {
-        sanitizeJsonSchema(prop.items)
+        sanitizeJsonSchema(prop.items, false)
       }
     }
   }

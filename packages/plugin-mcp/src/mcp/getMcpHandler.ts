@@ -528,7 +528,17 @@ export const getMcpHandler = (
         }
       },
       {
-        instructions: serverOptions.instructions,
+        // C-instructions: a short default contract for writes when the app sets none.
+        instructions:
+          serverOptions.instructions ??
+          [
+            'Payload CMS content tools. Writes are partial: send only the fields you change.',
+            'Editing what you read: pass ifUpdatedAt (the updatedAt you read) to update/delete; a "Conflict" answer means nothing was written: re-read, re-apply only your change, retry.',
+            'Documents another user has open are locked: you get a Conflict naming them; do not pass overrideLock unless the user asked to take over.',
+            'Array rows carry an id: keep the ids of rows you keep, so their other-locale values survive; rows without an id are new.',
+            'Bulk writes report per document; "PARTIAL" means some failed and the rest stayed changed. An empty where is refused unless all: true.',
+            'Write answers are compact receipts; pass returnDocument: true for the whole document.',
+          ].join('\n'),
         serverInfo: serverOptions.serverInfo,
       },
       {

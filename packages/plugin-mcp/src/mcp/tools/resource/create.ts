@@ -13,6 +13,7 @@ import {
 } from '../../../utils/getVirtualFieldNames.js'
 import { convertCollectionSchemaToZod } from '../../../utils/schemaConversion/convertCollectionSchemaToZod.js'
 import { transformPointDataToPayload } from '../../../utils/transformPointDataToPayload.js'
+import { errorResponse, OPERATION_ARGS, receipt } from '../../helpers/writeSafety.js'
 import { toolSchemas } from '../schemas.js'
 export const createResourceTool = (
   server: McpServer,
@@ -30,6 +31,7 @@ export const createResourceTool = (
     locale?: string,
     fallbackLocale?: string,
     select?: Record<string, unknown>,
+    returnDocument: boolean = false,
   ): Promise<{
     content: Array<{
       text: string
@@ -63,9 +65,7 @@ export const createResourceTool = (
         }
       } catch (_parseError) {
         payload.logger.error(`[payload-mcp] Invalid JSON data provided: ${data}`)
-        return {
-          content: [{ type: 'text' as const, text: 'Error: Invalid JSON data provided' }],
-        }
+        return errorResponse('Error: Invalid JSON data provided')
       }
 
       // Create the resource
@@ -88,7 +88,9 @@ export const createResourceTool = (
         )
       }
 
-      const response = {
+      const response = !returnDocument && !select
+        ? receipt({ action: 'created', collectionSlug, doc: result as unknown as Record<string, unknown>, written: Object.keys(parsedData) })
+        : {
         content: [
           {
             type: 'text' as const,
@@ -114,14 +116,7 @@ ${JSON.stringify(result)}
         `[payload-mcp] Error creating resource in ${collectionSlug}: ${errorMessage}`,
       )
 
-      const response = {
-        content: [
-          {
-            type: 'text' as const,
-            text: `Error creating resource in collection "${collectionSlug}": ${errorMessage}`,
-          },
-        ],
-      }
+      const response = errorResponse(`Error creating resource in collection "${collectionSlug}": ${errorMessage}`)
 
       return (collections?.[collectionSlug]?.overrideResponse?.(response, {}, req) || response) as {
         content: Array<{
@@ -136,8 +131,21 @@ ${JSON.stringify(result)}
     const convertedFields = convertCollectionSchemaToZod(schema)
 
     // Create a new schema that combines the converted fields with create-specific parameters
+    // C-args: fields named like an operation argument are written through `data` only.
+    const shape = convertedFields.shape as Record<string, z.ZodTypeAny>
+    const colliding = Object.keys(shape).filter((k) => OPERATION_ARGS.includes(k))
     const createResourceSchema = z.object({
-      ...convertedFields.shape,
+      ...Object.fromEntries(Object.entries(shape).filter(([k]) => !OPERATION_ARGS.includes(k))),
+      ...(colliding.length
+        ? {
+            data: z
+              .object(Object.fromEntries(colliding.map((k) => [k, shape[k]!])))
+              .partial()
+              .optional()
+              .describe(`Document fields named ${colliding.join(', ')}: write them here (the top-level names are operation arguments).`),
+          }
+        : {}),
+      returnDocument: z.boolean().optional().default(false).describe('Return the whole created document instead of a compact receipt'),
       depth: z
         .number()
         .int()
@@ -172,12 +180,13 @@ ${JSON.stringify(result)}
     server.registerTool(
       `create${collectionSlug.charAt(0).toUpperCase() + toCamelCase(collectionSlug).slice(1)}`,
       {
+        annotations: { destructiveHint: false, idempotentHint: false, openWorldHint: false, readOnlyHint: false },
         description: `${collections?.[collectionSlug]?.description || toolSchemas.createResource.description.trim()}`,
         inputSchema: createResourceSchema.shape,
       },
       async (params: Record<string, unknown>) => {
-        const { depth, draft, fallbackLocale, locale, select, ...fieldData } = params
-        const data = JSON.stringify(fieldData)
+        const { data: nested, depth, draft, fallbackLocale, locale, returnDocument, select, ...fieldData } = params
+        const data = JSON.stringify({ ...fieldData, ...((nested as Record<string, unknown>) || {}) })
         return await tool(
           data,
           depth as number,
@@ -185,6 +194,7 @@ ${JSON.stringify(result)}
           locale as string | undefined,
           fallbackLocale as string | undefined,
           select as Record<string, unknown> | undefined,
+          Boolean(returnDocument),
         )
       },
     )
