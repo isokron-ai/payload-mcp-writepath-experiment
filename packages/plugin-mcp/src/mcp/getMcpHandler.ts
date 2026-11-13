@@ -533,10 +533,11 @@ export const getMcpHandler = (
           serverOptions.instructions ??
           [
             'Payload CMS content tools. Writes are partial: send only the fields you change.',
-            'Editing what you read: pass ifUpdatedAt (the updatedAt you read) to update/delete; a "Conflict" answer means nothing was written: re-read, re-apply only your change, retry.',
+            'Several documents getting the same change or deletion: use ONE update/delete call with where (e.g. {"id":{"in":[1,2,3]}}), not one call per document.',
+            'Every update/delete, bulk included, is checked per document against the version you last read; a "Conflict" means that document was NOT written: re-apply only your change to the current version it carries, retry. Pass ifUpdatedAt only to pin a specific version (a string with id; {"<id>":"<updatedAt>"} with where).',
             'Documents another user has open are locked: you get a Conflict naming them; do not pass overrideLock unless the user asked to take over.',
             'Array rows carry an id: keep the ids of rows you keep, so their other-locale values survive; rows without an id are new.',
-            'Bulk writes report per document; "PARTIAL" means some failed and the rest stayed changed. An empty where is refused unless all: true.',
+            'Bulk writes are best-effort and report per document; "PARTIAL" means some were refused or failed and NOT changed while the rest were applied. An empty where is refused unless all: true.',
             'Write answers are compact receipts; pass returnDocument: true for the whole document.',
           ].join('\n'),
         serverInfo: serverOptions.serverInfo,

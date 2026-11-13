@@ -224,3 +224,121 @@ export async function readVersionCheck(args: {
   }
   return null
 }
+
+/** ifUpdatedAt as a per-document version map (bulk calls): {"<id>": "<updatedAt>"}. */
+export type VersionMap = Record<string, string>
+
+export const isVersionMap = (v: unknown): v is VersionMap =>
+  !!v && typeof v === 'object' && !Array.isArray(v) && Object.values(v as object).every((x) => typeof x === 'string')
+
+/** Map keys as ids for a where clause (numeric ids on SQL adapters arrive as strings in a JSON object key). */
+export const idsOf = (versions: VersionMap): Array<number | string> =>
+  Object.keys(versions).map((k) => (/^\d+$/.test(k) ? Number(k) : k))
+
+export type BulkRefusal = {
+  conflict: 'stale'
+  currentDocument: null | Record<string, unknown>
+  documentUpdatedAt: null | string
+  id: unknown
+  ifUpdatedAt: string
+  ok: false
+  precondition: 'ifUpdatedAt' | 'last_read'
+}
+
+/**
+ * C-bulk-versions (research v2): per-document preconditions for a where-based update or delete. Every matching
+ * document is checked against the version pinned for it in `versions` (ifUpdatedAt map) or, when none is pinned,
+ * against the version this user last read (C-readversion), exactly as a write by id is. Documents that changed are
+ * refused (with their current state); the rest may be written. Best-effort (read, then write), like the by-id check.
+ */
+export async function bulkPreflight(args: {
+  collectionSlug: string
+  req: PayloadRequest
+  user: TypedUser
+  versions?: VersionMap
+  where: Record<string, unknown>
+}): Promise<{ allowed: Array<number | string>; matched: number; refused: BulkRefusal[]; unmatchedPins: string[] }> {
+  const { collectionSlug, user, versions, where } = args
+  const { docs } = (await args.req.payload.find({
+    collection: collectionSlug,
+    depth: 0,
+    draft: true,
+    overrideAccess: false,
+    pagination: false,
+    user,
+    where: where as never,
+  })) as unknown as { docs: Array<Record<string, unknown> & { createdAt?: string; id: number | string; updatedAt?: string }> }
+  const allowed: Array<number | string> = []
+  const refused: BulkRefusal[] = []
+  for (const doc of docs) {
+    const pinned = versions?.[String(doc.id)]
+    const expected = pinned ?? lastSeen.get(seenKey(user?.id, collectionSlug, doc.id, doc.createdAt))
+    if (expected && doc.updatedAt && expected !== doc.updatedAt) {
+      refused.push({
+        id: doc.id,
+        conflict: 'stale',
+        currentDocument: doc,
+        documentUpdatedAt: doc.updatedAt,
+        ifUpdatedAt: expected,
+        ok: false,
+        precondition: pinned ? 'ifUpdatedAt' : 'last_read',
+      })
+    } else {
+      allowed.push(doc.id)
+    }
+  }
+  const matchedIds = new Set(docs.map((d) => String(d.id)))
+  const unmatchedPins = Object.keys(versions || {}).filter((k) => !matchedIds.has(k))
+  return { allowed, matched: docs.length, refused, unmatchedPins }
+}
+
+/**
+ * The answer to a bulk update or delete (C-bulk, v2). Best-effort and said so: documents refused as stale or that
+ * failed were NOT changed; the others were applied and stay applied (nothing is rolled back). Headline: plain
+ * success, "PARTIAL:" (some applied, some not) or "Conflict:" (none applied because every match was refused).
+ */
+export function bulkAnswer(args: {
+  action: 'deleted' | 'updated'
+  applied: Array<Record<string, unknown>>
+  collectionSlug: string
+  errors: Array<{ id?: unknown; message?: string }>
+  readTool: string
+  refused: BulkRefusal[]
+  returnDocument: boolean
+  unmatchedPins: string[]
+}): ToolResponse {
+  const { action, applied, collectionSlug, errors, readTool, refused, unmatchedPins } = args
+  const notChanged = refused.length + errors.length
+  const items = [
+    ...applied.map((d) => (action === 'updated' ? { id: d.id, ok: true, updatedAt: d.updatedAt } : { id: d.id, ok: true })),
+    ...refused,
+    ...errors.map((e) => ({ id: e.id, error: e.message, ok: false })),
+  ]
+  const pins = Object.fromEntries(refused.map((r) => [String(r.id), r.documentUpdatedAt]))
+  const next =
+    action === 'deleted'
+      ? `check them; if they should still be deleted, retry those ids in one call with ifUpdatedAt ${JSON.stringify(pins)}`
+      : `re-apply only your change to those ids and retry them in one call with ifUpdatedAt ${JSON.stringify(pins)}`
+  const staleText = refused.length
+    ? `${refused.length} changed since you read them (conflict "stale"; currentDocument shows each one now): ${next}, or re-read them with ${readTool}`
+    : ''
+  const errText = errors.length ? `${errors.length} failed (see error)` : ''
+  const why = [staleText, errText].filter(Boolean).join('; ')
+  let head: string
+  if (notChanged === 0) {
+    head = `${action === 'deleted' ? 'Deleted' : 'Updated'} ${applied.length} document(s) ${action === 'deleted' ? 'from' : 'in'} "${collectionSlug}".`
+  } else if (applied.length === 0) {
+    head = `Conflict: nothing was ${action} in "${collectionSlug}": ${notChanged} matching document(s) NOT changed: ${why}.`
+  } else {
+    head = `PARTIAL: ${action} ${applied.length} document(s) ${action === 'deleted' ? 'from' : 'in'} "${collectionSlug}"; ${notChanged} NOT changed: ${why}. Best-effort: the ${applied.length} applied stay ${action} (nothing is rolled back).`
+  }
+  const summary: Record<string, unknown> = { mode: 'best_effort', applied: applied.length, not_changed: notChanged, results: items }
+  if (unmatchedPins.length) {
+    summary.pinsNotMatched = unmatchedPins
+    head += ` ifUpdatedAt named ${unmatchedPins.length} id(s) your where did not match; they were not touched.`
+  }
+  const body = args.returnDocument
+    ? `\n\`\`\`json\n${JSON.stringify({ mode: 'best_effort', docs: applied, refused, errors })}\n\`\`\``
+    : `\n${JSON.stringify(summary)}`
+  return { content: [{ type: 'text', text: head + body }], ...(notChanged ? { isError: true } : {}) }
+}

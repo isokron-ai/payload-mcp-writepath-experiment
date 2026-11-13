@@ -14,10 +14,14 @@ import {
 import { convertCollectionSchemaToZod } from '../../../utils/schemaConversion/convertCollectionSchemaToZod.js'
 import { transformPointDataToPayload } from '../../../utils/transformPointDataToPayload.js'
 import {
+  bulkAnswer,
+  bulkPreflight,
   currentDocument,
   currentUpdatedAt,
   errorResponse,
+  idsOf,
   isLockedError,
+  isVersionMap,
   lockConflict,
   lockInfo,
   OPERATION_ARGS,
@@ -26,6 +30,7 @@ import {
   rememberRead,
   staleConflict,
   type ToolResponse,
+  type VersionMap,
 } from '../../helpers/writeSafety.js'
 import { toolSchemas } from '../schemas.js'
 
@@ -53,7 +58,7 @@ export const updateResourceTool = (
     draft: boolean
     fallbackLocale?: string
     id?: number | string
-    ifUpdatedAt?: string
+    ifUpdatedAt?: string | VersionMap
     locale?: string
     overrideLock: boolean
     returnDocument: boolean
@@ -61,7 +66,11 @@ export const updateResourceTool = (
     where?: string
   }): Promise<ToolResponse> => {
     const payload = req.payload
-    const { id, where } = o
+    const { id } = o
+    const versions = isVersionMap(o.ifUpdatedAt) ? o.ifUpdatedAt : undefined
+    // C-bulk-versions (v2): a version map alone selects the documents it names.
+    const where = o.where ?? (id === undefined && versions && Object.keys(versions).length ? JSON.stringify({ id: { in: idsOf(versions) } }) : undefined)
+    const pin = typeof o.ifUpdatedAt === 'string' ? o.ifUpdatedAt : id !== undefined ? versions?.[String(id)] : undefined
     let parsedData = transformPointDataToPayload(o.data)
     parsedData = stripVirtualFields(parsedData, getCollectionVirtualFieldNames(payload.config, collectionSlug))
     const written = Object.keys(parsedData)
@@ -71,6 +80,13 @@ export const updateResourceTool = (
 
     if (id === undefined && !where) {
       return out(errorResponse('Error: Either id or where clause must be provided'))
+    }
+    if (id === undefined && typeof o.ifUpdatedAt === 'string') {
+      return out(
+        errorResponse(
+          'Error: ifUpdatedAt as a single value pins one document (use it with id). For a bulk call pass a map {"<id>": "<updatedAt>"}, or leave it out: each document is checked against the version you last read. Nothing was changed.',
+        ),
+      )
     }
 
     let whereClause: Record<string, unknown> = {}
@@ -96,10 +112,10 @@ export const updateResourceTool = (
     try {
       if (id !== undefined) {
         // C-conflict: optional precondition on the version the agent read.
-        if (o.ifUpdatedAt) {
+        if (pin) {
           const current = await currentUpdatedAt({ collectionSlug, id, req, user })
-          if (current !== o.ifUpdatedAt) {
-            return out(staleConflict({ action: 'update', collectionSlug, current, currentDoc: await currentDocument({ collectionSlug, id, req, user }), id, readTool, sent: o.ifUpdatedAt }))
+          if (current !== pin) {
+            return out(staleConflict({ action: 'update', collectionSlug, current, currentDoc: await currentDocument({ collectionSlug, id, req, user }), id, readTool, sent: pin }))
           }
         } else {
           // C-readversion: no explicit precondition: the version this user last read is the precondition.
@@ -140,36 +156,40 @@ export const updateResourceTool = (
         return out(receipt({ action: 'updated', collectionSlug, doc, written }), result)
       }
 
-      // Bulk: per-document results; isError when any document failed (C-bulk).
-      const result = (await payload.update({
-        collection: collectionSlug,
-        data: parsedData,
-        depth: o.depth,
-        draft: o.draft,
-        overrideAccess: false,
-        overrideLock: o.overrideLock,
-        req,
-        user,
-        where: whereClause,
-        ...(o.locale && { locale: o.locale }),
-        ...(o.fallbackLocale && { fallbackLocale: o.fallbackLocale }),
-        ...(o.select && { select: o.select as SelectType }),
-      } as never)) as { docs?: Record<string, unknown>[]; errors?: { id?: unknown; message?: string }[] }
-      const docs = result.docs || []
-      const errors = result.errors || []
+      // Bulk (v2): per-document preconditions (pinned in the ifUpdatedAt map, else the version this user last read);
+      // stale documents are refused with their current state, the rest are updated; per-document results, isError
+      // when any document was not changed (C-bulk, best-effort).
+      const pre = await bulkPreflight({ collectionSlug, req, user, versions, where: whereClause })
+      let docs: Record<string, unknown>[] = []
+      let errors: { id?: unknown; message?: string }[] = []
+      if (pre.allowed.length) {
+        const result = (await payload.update({
+          collection: collectionSlug,
+          data: parsedData,
+          depth: o.depth,
+          draft: o.draft,
+          overrideAccess: false,
+          overrideLock: o.overrideLock,
+          req,
+          user,
+          where: { and: [whereClause, { id: { in: pre.allowed } }] },
+          ...(o.locale && { locale: o.locale }),
+          ...(o.fallbackLocale && { fallbackLocale: o.fallbackLocale }),
+          ...(o.select && { select: o.select as SelectType }),
+        } as never)) as { docs?: Record<string, unknown>[]; errors?: { id?: unknown; message?: string }[] }
+        docs = result.docs || []
+        errors = result.errors || []
+        const seen = new Set([...docs.map((d) => String(d.id)), ...errors.map((e) => String(e.id))])
+        for (const a of pre.allowed) {
+          if (!seen.has(String(a))) {
+            errors.push({ id: a, message: 'no longer matched the where clause when it was written; not changed' })
+          }
+        }
+      }
       rememberRead(user, collectionSlug, docs)
-      const items = [
-        ...docs.map((d) => ({ id: d.id, ok: true, updatedAt: d.updatedAt })),
-        ...errors.map((e) => ({ id: e.id, error: e.message, ok: false })),
-      ]
-      const head =
-        errors.length === 0
-          ? `Updated ${docs.length} document(s) in "${collectionSlug}".`
-          : `PARTIAL: updated ${docs.length} document(s) in "${collectionSlug}"; ${errors.length} failed and were NOT changed (the others stay changed).`
-      const body = o.returnDocument ? `\n\`\`\`json\n${JSON.stringify({ docs, errors })}\n\`\`\`` : `\n${JSON.stringify({ results: items })}`
       return out(
-        { content: [{ type: 'text', text: head + body }], ...(errors.length ? { isError: true } : {}) },
-        { docs, errors },
+        bulkAnswer({ action: 'updated', applied: docs, collectionSlug, errors, readTool, refused: pre.refused, returnDocument: o.returnDocument, unmatchedPins: pre.unmatchedPins }),
+        { docs, errors, refused: pre.refused },
       )
     } catch (error) {
       if (id !== undefined && isLockedError(error)) {
@@ -213,10 +233,10 @@ export const updateResourceTool = (
         .describe('Optional: fallback locale code to use when requested locale is not available'),
       id: z.union([z.string(), z.number()]).optional().describe('The ID of the document to update'),
       ifUpdatedAt: z
-        .string()
+        .union([z.string(), z.record(z.string(), z.string())])
         .optional()
         .describe(
-          'Recommended for edits based on an earlier read: the updatedAt you read. If the document changed since, nothing is written and you get the current updatedAt',
+          'Optional pin; without it each document is checked against the version you last read. With id: the updatedAt string. With where: a map {"<id>": "<updatedAt>"}. A changed document is not written; you get its current version',
         ),
       locale: z
         .string()
@@ -238,7 +258,7 @@ export const updateResourceTool = (
         .record(z.string(), z.unknown())
         .optional()
         .describe("Optional: define exactly which fields you'd like to return in the response, e.g., {\"title\": true}"),
-      where: z.string().optional().describe('JSON string for where clause to update multiple documents'),
+      where: z.string().optional().describe('JSON string for where clause to update multiple documents in one call, e.g. {"id":{"in":[1,2]}}'),
     })
 
     server.registerTool(
@@ -271,7 +291,7 @@ export const updateResourceTool = (
           draft: Boolean(draft),
           fallbackLocale: fallbackLocale as string | undefined,
           id: id as number | string | undefined,
-          ifUpdatedAt: ifUpdatedAt as string | undefined,
+          ifUpdatedAt: ifUpdatedAt as string | undefined | VersionMap,
           locale: locale as string | undefined,
           overrideLock: Boolean(overrideLock),
           returnDocument: Boolean(returnDocument),

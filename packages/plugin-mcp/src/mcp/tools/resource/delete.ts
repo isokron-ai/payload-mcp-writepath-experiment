@@ -7,16 +7,21 @@ import type { MCPPluginConfig } from '../../../types.js'
 
 import { toCamelCase } from '../../../utils/camelCase.js'
 import {
+  bulkAnswer,
+  bulkPreflight,
   currentDocument,
   currentUpdatedAt,
   errorResponse,
+  idsOf,
   isLockedError,
+  isVersionMap,
   lockConflict,
   lockInfo,
   readVersionCheck,
   receipt,
   staleConflict,
   type ToolResponse,
+  type VersionMap,
 } from '../../helpers/writeSafety.js'
 import { toolSchemas } from '../schemas.js'
 
@@ -41,17 +46,28 @@ export const deleteResourceTool = (
     depth: number
     fallbackLocale?: string
     id?: number | string
-    ifUpdatedAt?: string
+    ifUpdatedAt?: string | VersionMap
     locale?: string
     overrideLock: boolean
     returnDocument: boolean
     where?: string
   }): Promise<ToolResponse> => {
     const payload = req.payload
-    const { id, where } = o
+    const { id } = o
+    const versions = isVersionMap(o.ifUpdatedAt) ? o.ifUpdatedAt : undefined
+    // C-bulk-versions (v2): a version map alone selects the documents it names.
+    const where = o.where ?? (id === undefined && versions && Object.keys(versions).length ? JSON.stringify({ id: { in: idsOf(versions) } }) : undefined)
     if (id === undefined && !where) {
       return out(errorResponse('Error: Either id or where clause must be provided'))
     }
+    if (id === undefined && typeof o.ifUpdatedAt === 'string') {
+      return out(
+        errorResponse(
+          'Error: ifUpdatedAt as a single value pins one document (use it with id). For a bulk call pass a map {"<id>": "<updatedAt>"}, or leave it out: each document is checked against the version you last read. Nothing was deleted.',
+        ),
+      )
+    }
+    const pin = typeof o.ifUpdatedAt === 'string' ? o.ifUpdatedAt : id !== undefined ? versions?.[String(id)] : undefined
     const deleteOptions: Record<string, unknown> = {
       collection: collectionSlug,
       depth: o.depth,
@@ -84,10 +100,10 @@ export const deleteResourceTool = (
 
     try {
       if (id !== undefined) {
-        if (o.ifUpdatedAt) {
+        if (pin) {
           const current = await currentUpdatedAt({ collectionSlug, id, req, user })
-          if (current !== o.ifUpdatedAt) {
-            return out(staleConflict({ action: 'delete', collectionSlug, current, currentDoc: await currentDocument({ collectionSlug, id, req, user }), id, readTool, sent: o.ifUpdatedAt }))
+          if (current !== pin) {
+            return out(staleConflict({ action: 'delete', collectionSlug, current, currentDoc: await currentDocument({ collectionSlug, id, req, user }), id, readTool, sent: pin }))
           }
         } else {
           const stale = await readVersionCheck({ collectionSlug, id, req, user })
@@ -111,24 +127,29 @@ export const deleteResourceTool = (
         }
         return out(receipt({ action: 'deleted', collectionSlug, doc: result }), result)
       }
-      const result = (await payload.delete(deleteOptions as never)) as {
-        docs?: Record<string, unknown>[]
-        errors?: { id?: unknown; message?: string }[]
+      // Bulk (v2): every matching document is checked against its pinned or last-read version first; the stale ones
+      // are refused with their current state, the rest are deleted (best-effort, per document).
+      const whereClause = deleteOptions.where as Record<string, unknown>
+      const pre = await bulkPreflight({ collectionSlug, req, user, versions, where: whereClause })
+      let docs: Record<string, unknown>[] = []
+      let errors: { id?: unknown; message?: string }[] = []
+      if (pre.allowed.length) {
+        const result = (await payload.delete({
+          ...deleteOptions,
+          where: { and: [whereClause, { id: { in: pre.allowed } }] },
+        } as never)) as { docs?: Record<string, unknown>[]; errors?: { id?: unknown; message?: string }[] }
+        docs = result.docs || []
+        errors = result.errors || []
+        const seen = new Set([...docs.map((d) => String(d.id)), ...errors.map((e) => String(e.id))])
+        for (const a of pre.allowed) {
+          if (!seen.has(String(a))) {
+            errors.push({ id: a, message: 'no longer matched the where clause when it was deleted; not deleted' })
+          }
+        }
       }
-      const docs = result.docs || []
-      const errors = result.errors || []
-      const items = [
-        ...docs.map((d) => ({ id: d.id, ok: true })),
-        ...errors.map((e) => ({ id: e.id, error: e.message, ok: false })),
-      ]
-      const head =
-        errors.length === 0
-          ? `Deleted ${docs.length} document(s) from "${collectionSlug}".`
-          : `PARTIAL: deleted ${docs.length} document(s) from "${collectionSlug}"; ${errors.length} could NOT be deleted (the others are gone).`
-      const body = o.returnDocument ? `\n\`\`\`json\n${JSON.stringify({ docs, errors })}\n\`\`\`` : `\n${JSON.stringify({ results: items })}`
       return out(
-        { content: [{ type: 'text', text: head + body }], ...(errors.length ? { isError: true } : {}) },
-        { docs, errors },
+        bulkAnswer({ action: 'deleted', applied: docs, collectionSlug, errors, readTool, refused: pre.refused, returnDocument: o.returnDocument, unmatchedPins: pre.unmatchedPins }),
+        { docs, errors, refused: pre.refused },
       )
     } catch (error) {
       if (id !== undefined && isLockedError(error)) {
@@ -146,9 +167,11 @@ export const deleteResourceTool = (
       ...toolSchemas.deleteResource.parameters.shape,
       all: z.boolean().optional().default(false).describe('Required to delete every document with an empty where clause'),
       ifUpdatedAt: z
-        .string()
+        .union([z.string(), z.record(z.string(), z.string())])
         .optional()
-        .describe('Optional: the updatedAt you read; if the document changed since, nothing is deleted'),
+        .describe(
+          'Optional pin; without it each document is checked against the version you last read. With id: the updatedAt string. With where: a map {"<id>": "<updatedAt>"}. A changed document is not deleted',
+        ),
       overrideLock: z
         .boolean()
         .optional()
@@ -171,7 +194,7 @@ export const deleteResourceTool = (
           depth: (p.depth as number) ?? 0,
           fallbackLocale: p.fallbackLocale as string | undefined,
           id: p.id as number | string | undefined,
-          ifUpdatedAt: p.ifUpdatedAt as string | undefined,
+          ifUpdatedAt: p.ifUpdatedAt as string | undefined | VersionMap,
           locale: p.locale as string | undefined,
           overrideLock: Boolean(p.overrideLock),
           returnDocument: Boolean(p.returnDocument),
