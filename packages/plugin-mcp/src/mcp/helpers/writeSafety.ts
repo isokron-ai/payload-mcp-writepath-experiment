@@ -154,3 +154,50 @@ export const OPERATION_ARGS = [
   'select',
   'where',
 ]
+
+/**
+ * C-readversion: the version each user last read, per document (and per document incarnation: createdAt, so a
+ * re-created document with the same id starts clean). An update or delete by id with no ifUpdatedAt uses it as the
+ * precondition: if the document changed since this user last read or wrote it, the write is refused as stale.
+ * In-process memory only (the MCP transport is stateless); best-effort, like ifUpdatedAt.
+ */
+const lastSeen = new Map<string, string>()
+const seenKey = (userId: unknown, collectionSlug: string, id: unknown, createdAt: unknown) =>
+  `${String(userId)}|${collectionSlug}|${String(id)}|${String(createdAt)}`
+
+export function rememberRead(user: TypedUser | undefined, collectionSlug: string, docs: unknown[]): void {
+  if (!user) {
+    return
+  }
+  for (const d of docs) {
+    const doc = d as { createdAt?: string; id?: unknown; updatedAt?: string }
+    if (doc && doc.id !== undefined && doc.updatedAt) {
+      lastSeen.set(seenKey(user.id, collectionSlug, doc.id, doc.createdAt), doc.updatedAt)
+    }
+  }
+}
+
+export async function readVersionCheck(args: {
+  collectionSlug: string
+  id: number | string
+  req: PayloadRequest
+  user: TypedUser
+}): Promise<{ current: null | string; seen: string } | null> {
+  try {
+    const doc = (await args.req.payload.findByID({
+      id: args.id,
+      collection: args.collectionSlug,
+      depth: 0,
+      draft: true,
+      overrideAccess: false,
+      user: args.user,
+    })) as { createdAt?: string; updatedAt?: string }
+    const seen = lastSeen.get(seenKey(args.user?.id, args.collectionSlug, args.id, doc?.createdAt))
+    if (seen && doc?.updatedAt && seen !== doc.updatedAt) {
+      return { current: doc.updatedAt, seen }
+    }
+  } catch {
+    // a missing document is reported by the write itself
+  }
+  return null
+}

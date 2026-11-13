@@ -13,7 +13,7 @@ import {
 } from '../../../utils/getVirtualFieldNames.js'
 import { convertCollectionSchemaToZod } from '../../../utils/schemaConversion/convertCollectionSchemaToZod.js'
 import { transformPointDataToPayload } from '../../../utils/transformPointDataToPayload.js'
-import { errorResponse, OPERATION_ARGS, receipt } from '../../helpers/writeSafety.js'
+import { errorResponse, OPERATION_ARGS, receipt, rememberRead } from '../../helpers/writeSafety.js'
 import { toolSchemas } from '../schemas.js'
 export const createResourceTool = (
   server: McpServer,
@@ -88,6 +88,7 @@ export const createResourceTool = (
         )
       }
 
+      rememberRead(user, collectionSlug, [result])
       const response = !returnDocument && !select
         ? receipt({ action: 'created', collectionSlug, doc: result as unknown as Record<string, unknown>, written: Object.keys(parsedData) })
         : {

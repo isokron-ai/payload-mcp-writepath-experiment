@@ -20,7 +20,9 @@ import {
   lockConflict,
   lockInfo,
   OPERATION_ARGS,
+  readVersionCheck,
   receipt,
+  rememberRead,
   staleConflict,
   type ToolResponse,
 } from '../../helpers/writeSafety.js'
@@ -98,6 +100,12 @@ export const updateResourceTool = (
           if (current !== o.ifUpdatedAt) {
             return out(staleConflict({ action: 'update', collectionSlug, current, id, readTool, sent: o.ifUpdatedAt }))
           }
+        } else {
+          // C-readversion: no explicit precondition: the version this user last read is the precondition.
+          const stale = await readVersionCheck({ collectionSlug, id, req, user })
+          if (stale) {
+            return out(staleConflict({ action: 'update', collectionSlug, current: stale.current, id, readTool, sent: stale.seen }))
+          }
         }
         const result = await payload.update({
           id,
@@ -114,6 +122,7 @@ export const updateResourceTool = (
           ...(o.select && { select: o.select as SelectType }),
         } as never)
         const doc = result as unknown as Record<string, unknown>
+        rememberRead(user, collectionSlug, [doc])
         if (o.returnDocument || o.select) {
           return out(
             {
@@ -147,6 +156,7 @@ export const updateResourceTool = (
       } as never)) as { docs?: Record<string, unknown>[]; errors?: { id?: unknown; message?: string }[] }
       const docs = result.docs || []
       const errors = result.errors || []
+      rememberRead(user, collectionSlug, docs)
       const items = [
         ...docs.map((d) => ({ id: d.id, ok: true, updatedAt: d.updatedAt })),
         ...errors.map((e) => ({ id: e.id, error: e.message, ok: false })),

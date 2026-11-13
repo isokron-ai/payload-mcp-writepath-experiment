@@ -12,6 +12,7 @@ import {
   isLockedError,
   lockConflict,
   lockInfo,
+  readVersionCheck,
   receipt,
   staleConflict,
   type ToolResponse,
@@ -86,6 +87,11 @@ export const deleteResourceTool = (
           const current = await currentUpdatedAt({ collectionSlug, id, req, user })
           if (current !== o.ifUpdatedAt) {
             return out(staleConflict({ action: 'delete', collectionSlug, current, id, readTool, sent: o.ifUpdatedAt }))
+          }
+        } else {
+          const stale = await readVersionCheck({ collectionSlug, id, req, user })
+          if (stale) {
+            return out(staleConflict({ action: 'delete', collectionSlug, current: stale.current, id, readTool, sent: stale.seen }))
           }
         }
         const result = (await payload.delete(deleteOptions as never)) as unknown as Record<string, unknown>

@@ -4,6 +4,7 @@ import type { JoinQuery, PayloadRequest, PopulateType, SelectType, TypedUser } f
 import type { MCPPluginConfig } from '../../../types.js'
 
 import { toCamelCase } from '../../../utils/camelCase.js'
+import { rememberRead } from '../../helpers/writeSafety.js'
 import { toolSchemas } from '../schemas.js'
 
 export const findResourceTool = (
@@ -86,6 +87,7 @@ export const findResourceTool = (
             ...(trash !== undefined && { trash }),
           })
 
+          rememberRead(user, collectionSlug, [doc])
           if (verboseLogs) {
             payload.logger.info(`[payload-mcp] Found document with ID: ${id}`)
           }
@@ -157,6 +159,7 @@ ${JSON.stringify(doc)}`,
       }
 
       const result = await payload.find(findOptions)
+      rememberRead(user, collectionSlug, result.docs)
 
       if (verboseLogs) {
         payload.logger.info(
