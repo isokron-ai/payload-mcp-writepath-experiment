@@ -1,10 +1,25 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { PayloadRequest, TypedUser } from 'payload'
 
+import { z } from 'zod'
+
 import type { MCPPluginConfig } from '../../../types.js'
 
 import { toCamelCase } from '../../../utils/camelCase.js'
+import {
+  currentUpdatedAt,
+  errorResponse,
+  isLockedError,
+  lockConflict,
+  lockInfo,
+  receipt,
+  staleConflict,
+  type ToolResponse,
+} from '../../helpers/writeSafety.js'
 import { toolSchemas } from '../schemas.js'
+
+const toolName = (slug: string, verb: string) =>
+  `${verb}${slug.charAt(0).toUpperCase() + toCamelCase(slug).slice(1)}`
 
 export const deleteResourceTool = (
   server: McpServer,
@@ -14,205 +29,147 @@ export const deleteResourceTool = (
   collectionSlug: string,
   collections: MCPPluginConfig['collections'],
 ) => {
-  const tool = async (
-    id?: number | string,
-    where?: string,
-    depth: number = 0,
-    locale?: string,
-    fallbackLocale?: string,
-  ): Promise<{
-    content: Array<{
-      text: string
-      type: 'text'
-    }>
-  }> => {
-    const payload = req.payload
+  const readTool = toolName(collectionSlug, 'find')
+  const out = (response: ToolResponse, result: unknown = {}) =>
+    (collections?.[collectionSlug]?.overrideResponse?.(response as never, result as never, req) ||
+      response) as ToolResponse
 
-    if (verboseLogs) {
-      payload.logger.info(
-        `[payload-mcp] Deleting resource from collection: ${collectionSlug}${id ? ` with ID: ${id}` : ' with where clause'}${locale ? `, locale: ${locale}` : ''}`,
-      )
+  const tool = async (o: {
+    all: boolean
+    depth: number
+    fallbackLocale?: string
+    id?: number | string
+    ifUpdatedAt?: string
+    locale?: string
+    overrideLock: boolean
+    returnDocument: boolean
+    where?: string
+  }): Promise<ToolResponse> => {
+    const payload = req.payload
+    const { id, where } = o
+    if (id === undefined && !where) {
+      return out(errorResponse('Error: Either id or where clause must be provided'))
+    }
+    const deleteOptions: Record<string, unknown> = {
+      collection: collectionSlug,
+      depth: o.depth,
+      overrideAccess: false,
+      overrideLock: o.overrideLock,
+      req,
+      user,
+      ...(o.locale && { locale: o.locale }),
+      ...(o.fallbackLocale && { fallbackLocale: o.fallbackLocale }),
+    }
+    if (id === undefined && where) {
+      let whereClause: Record<string, unknown>
+      try {
+        whereClause = JSON.parse(where)
+      } catch {
+        return out(errorResponse('Error: Invalid JSON in where clause'))
+      }
+      if ((!whereClause || typeof whereClause !== 'object' || Object.keys(whereClause).length === 0) && !o.all) {
+        const { totalDocs } = await payload.count({ collection: collectionSlug, overrideAccess: false, user })
+        return out(
+          errorResponse(
+            `Refused: the where clause is empty, so it matches every document in "${collectionSlug}" (${totalDocs}). Nothing was deleted. Pass a filter, or all: true if the user really asked to delete all of them.`,
+          ),
+        )
+      }
+      deleteOptions.where = whereClause
+    } else {
+      deleteOptions.id = id
     }
 
     try {
-      // Validate that either id or where is provided
-      if (!id && !where) {
-        payload.logger.error('[payload-mcp] Either id or where clause must be provided')
-        const response = {
-          content: [
-            { type: 'text' as const, text: 'Error: Either id or where clause must be provided' },
-          ],
-        }
-        return (collections?.[collectionSlug]?.overrideResponse?.(response, {}, req) ||
-          response) as {
-          content: Array<{
-            text: string
-            type: 'text'
-          }>
-        }
-      }
-
-      // Parse where clause if provided
-      let whereClause = {}
-      if (where) {
-        try {
-          whereClause = JSON.parse(where)
-          if (verboseLogs) {
-            payload.logger.info(`[payload-mcp] Using where clause: ${where}`)
-          }
-        } catch (_parseError) {
-          payload.logger.warn(`[payload-mcp] Invalid where clause JSON: ${where}`)
-          const response = {
-            content: [{ type: 'text' as const, text: 'Error: Invalid JSON in where clause' }],
-          }
-          return (collections?.[collectionSlug]?.overrideResponse?.(response, {}, req) ||
-            response) as {
-            content: Array<{
-              text: string
-              type: 'text'
-            }>
+      if (id !== undefined) {
+        if (o.ifUpdatedAt) {
+          const current = await currentUpdatedAt({ collectionSlug, id, req, user })
+          if (current !== o.ifUpdatedAt) {
+            return out(staleConflict({ action: 'delete', collectionSlug, current, id, readTool, sent: o.ifUpdatedAt }))
           }
         }
-      }
-
-      // Build delete options
-      const deleteOptions: Record<string, unknown> = {
-        collection: collectionSlug,
-        depth,
-        overrideAccess: false,
-        req,
-        user,
-        ...(locale && { locale }),
-        ...(fallbackLocale && { fallbackLocale }),
-      }
-
-      // Delete by ID or where clause
-      if (id) {
-        deleteOptions.id = id
-        if (verboseLogs) {
-          payload.logger.info(`[payload-mcp] Deleting single document with ID: ${id}`)
-        }
-      } else {
-        deleteOptions.where = whereClause
-        if (verboseLogs) {
-          payload.logger.info(`[payload-mcp] Deleting multiple documents with where clause`)
-        }
-      }
-
-      const result = await payload.delete(deleteOptions as Parameters<typeof payload.delete>[0])
-
-      // Handle different result types
-      if (id) {
-        // Single document deletion
-        if (verboseLogs) {
-          payload.logger.info(`[payload-mcp] Successfully deleted document with ID: ${id}`)
-        }
-
-        const response = {
-          content: [
+        const result = (await payload.delete(deleteOptions as never)) as unknown as Record<string, unknown>
+        if (o.returnDocument) {
+          return out(
             {
-              type: 'text' as const,
-              text: `Document deleted successfully from collection "${collectionSlug}"!
-Deleted document:
-\`\`\`json
-${JSON.stringify(result)}
-\`\`\``,
+              content: [
+                {
+                  type: 'text',
+                  text: `Document deleted successfully from collection "${collectionSlug}"!\nDeleted document:\n\`\`\`json\n${JSON.stringify(result)}\n\`\`\``,
+                },
+              ],
             },
-          ],
-        }
-
-        return (collections?.[collectionSlug]?.overrideResponse?.(response, result, req) ||
-          response) as {
-          content: Array<{
-            text: string
-            type: 'text'
-          }>
-        }
-      } else {
-        // Multiple documents deletion
-        const bulkResult = result as { docs?: unknown[]; errors?: unknown[] }
-        const docs = bulkResult.docs || []
-        const errors = bulkResult.errors || []
-
-        if (verboseLogs) {
-          payload.logger.info(
-            `[payload-mcp] Successfully deleted ${docs.length} documents, ${errors.length} errors`,
+            result,
           )
         }
-
-        let responseText = `Document deleted successfully from collection "${collectionSlug}"!
-Deleted: ${docs.length} documents
-Errors: ${errors.length}
----`
-
-        if (docs.length > 0) {
-          responseText += `\n\nDeleted documents:
-\`\`\`json
-${JSON.stringify(docs)}
-\`\`\``
-        }
-
-        if (errors.length > 0) {
-          responseText += `\n\nErrors:
-\`\`\`json
-${JSON.stringify(errors)}
-\`\`\``
-        }
-
-        const response = {
-          content: [
-            {
-              type: 'text' as const,
-              text: responseText,
-            },
-          ],
-        }
-
-        return (collections?.[collectionSlug]?.overrideResponse?.(
-          response,
-          { docs, errors },
-          req,
-        ) || response) as {
-          content: Array<{
-            text: string
-            type: 'text'
-          }>
-        }
+        return out(receipt({ action: 'deleted', collectionSlug, doc: result }), result)
       }
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error'
-      payload.logger.error(
-        `[payload-mcp] Error deleting resource from ${collectionSlug}: ${errorMessage}`,
+      const result = (await payload.delete(deleteOptions as never)) as {
+        docs?: Record<string, unknown>[]
+        errors?: { id?: unknown; message?: string }[]
+      }
+      const docs = result.docs || []
+      const errors = result.errors || []
+      const items = [
+        ...docs.map((d) => ({ id: d.id, ok: true })),
+        ...errors.map((e) => ({ id: e.id, error: e.message, ok: false })),
+      ]
+      const head =
+        errors.length === 0
+          ? `Deleted ${docs.length} document(s) from "${collectionSlug}".`
+          : `PARTIAL: deleted ${docs.length} document(s) from "${collectionSlug}"; ${errors.length} could NOT be deleted (the others are gone).`
+      const body = o.returnDocument ? `\n\`\`\`json\n${JSON.stringify({ docs, errors })}\n\`\`\`` : `\n${JSON.stringify({ results: items })}`
+      return out(
+        { content: [{ type: 'text', text: head + body }], ...(errors.length ? { isError: true } : {}) },
+        { docs, errors },
       )
-
-      const response = {
-        content: [
-          {
-            type: 'text' as const,
-            text: `Error deleting resource from collection "${collectionSlug}": ${errorMessage}`,
-          },
-        ],
+    } catch (error) {
+      if (id !== undefined && isLockedError(error)) {
+        const info = await lockInfo({ collectionSlug, id, req, user })
+        return out(lockConflict({ action: 'delete', collectionSlug, id, info, readTool }))
       }
-
-      return (collections?.[collectionSlug]?.overrideResponse?.(response, {}, req) || response) as {
-        content: Array<{
-          text: string
-          type: 'text'
-        }>
-      }
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+      payload.logger.error(`[payload-mcp] Error deleting resource from ${collectionSlug}: ${errorMessage}`)
+      return out(errorResponse(`Error deleting resource from collection "${collectionSlug}": ${errorMessage}`))
     }
   }
 
   if (collections?.[collectionSlug]?.enabled) {
+    const deleteSchema = z.object({
+      ...toolSchemas.deleteResource.parameters.shape,
+      all: z.boolean().optional().default(false).describe('Required to delete every document with an empty where clause'),
+      ifUpdatedAt: z
+        .string()
+        .optional()
+        .describe('Optional: the updatedAt you read; if the document changed since, nothing is deleted'),
+      overrideLock: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe(
+          'Default false: a document another user has open for editing is not deleted, and you are told who has it. True deletes it anyway; only when the user asked for that',
+        ),
+      returnDocument: z.boolean().optional().default(false).describe('Return the whole deleted document instead of a compact receipt'),
+    })
     server.registerTool(
-      `delete${collectionSlug.charAt(0).toUpperCase() + toCamelCase(collectionSlug).slice(1)}`,
+      toolName(collectionSlug, 'delete'),
       {
+        annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: false, readOnlyHint: false },
         description: `${collections?.[collectionSlug]?.description || toolSchemas.deleteResource.description.trim()}`,
-        inputSchema: toolSchemas.deleteResource.parameters.shape,
+        inputSchema: deleteSchema.shape,
       },
-      async ({ id, depth, fallbackLocale, locale, where }) => {
-        return await tool(id, where, depth, locale, fallbackLocale)
-      },
+      async (p: Record<string, unknown>) =>
+        await tool({
+          all: Boolean(p.all),
+          depth: (p.depth as number) ?? 0,
+          fallbackLocale: p.fallbackLocale as string | undefined,
+          id: p.id as number | string | undefined,
+          ifUpdatedAt: p.ifUpdatedAt as string | undefined,
+          locale: p.locale as string | undefined,
+          overrideLock: Boolean(p.overrideLock),
+          returnDocument: Boolean(p.returnDocument),
+          where: p.where as string | undefined,
+        }),
     )
   }
 }

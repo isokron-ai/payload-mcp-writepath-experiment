@@ -13,7 +13,22 @@ import {
 } from '../../../utils/getVirtualFieldNames.js'
 import { convertCollectionSchemaToZod } from '../../../utils/schemaConversion/convertCollectionSchemaToZod.js'
 import { transformPointDataToPayload } from '../../../utils/transformPointDataToPayload.js'
+import {
+  currentUpdatedAt,
+  errorResponse,
+  isLockedError,
+  lockConflict,
+  lockInfo,
+  OPERATION_ARGS,
+  receipt,
+  staleConflict,
+  type ToolResponse,
+} from '../../helpers/writeSafety.js'
 import { toolSchemas } from '../schemas.js'
+
+const toolName = (slug: string, verb: string) =>
+  `${verb}${slug.charAt(0).toUpperCase() + toCamelCase(slug).slice(1)}`
+
 export const updateResourceTool = (
   server: McpServer,
   req: PayloadRequest,
@@ -23,325 +38,235 @@ export const updateResourceTool = (
   collections: MCPPluginConfig['collections'],
   schema: JSONSchema4,
 ) => {
-  const tool = async (
-    data: string,
-    id?: number | string,
-    where?: string,
-    draft: boolean = false,
-    depth: number = 0,
-    overrideLock: boolean = true,
-    locale?: string,
-    fallbackLocale?: string,
-    select?: Record<string, unknown>,
-  ): Promise<{
-    content: Array<{
-      text: string
-      type: 'text'
-    }>
-  }> => {
-    const payload = req.payload
+  const readTool = toolName(collectionSlug, 'find')
+  const out = (response: ToolResponse, result: unknown = {}) =>
+    (collections?.[collectionSlug]?.overrideResponse?.(response as never, result as never, req) ||
+      response) as ToolResponse
 
-    if (verboseLogs) {
-      payload.logger.info(
-        `[payload-mcp] Updating resource in collection: ${collectionSlug}${id ? ` with ID: ${id}` : ' with where clause'}, draft: ${draft}${locale ? `, locale: ${locale}` : ''}`,
-      )
+  const tool = async (o: {
+    all: boolean
+    data: Record<string, unknown>
+    depth: number
+    draft: boolean
+    fallbackLocale?: string
+    id?: number | string
+    ifUpdatedAt?: string
+    locale?: string
+    overrideLock: boolean
+    returnDocument: boolean
+    select?: Record<string, unknown>
+    where?: string
+  }): Promise<ToolResponse> => {
+    const payload = req.payload
+    const { id, where } = o
+    let parsedData = transformPointDataToPayload(o.data)
+    parsedData = stripVirtualFields(parsedData, getCollectionVirtualFieldNames(payload.config, collectionSlug))
+    const written = Object.keys(parsedData)
+    if (written.length === 0) {
+      return out(errorResponse(`Error: nothing to write. Pass the fields to change (or put them under data).`))
+    }
+
+    if (id === undefined && !where) {
+      return out(errorResponse('Error: Either id or where clause must be provided'))
+    }
+
+    let whereClause: Record<string, unknown> = {}
+    if (id === undefined && where) {
+      try {
+        whereClause = JSON.parse(where)
+      } catch {
+        return out(errorResponse('Error: Invalid JSON in where clause'))
+      }
+      // C-where: an empty filter matches every document; refuse it unless the caller says so.
+      if (!whereClause || typeof whereClause !== 'object' || Object.keys(whereClause).length === 0) {
+        if (!o.all) {
+          const { totalDocs } = await payload.count({ collection: collectionSlug, overrideAccess: false, user })
+          return out(
+            errorResponse(
+              `Refused: the where clause is empty, so it matches every document in "${collectionSlug}" (${totalDocs}). Nothing was changed. Pass a filter, or all: true if the user really asked to change all of them.`,
+            ),
+          )
+        }
+      }
     }
 
     try {
-      // Parse the data JSON
-      let parsedData: Record<string, unknown>
-      try {
-        parsedData = JSON.parse(data)
-
-        // Transform point fields from object format to tuple array
-        parsedData = transformPointDataToPayload(parsedData)
-
-        const virtualFieldNames = getCollectionVirtualFieldNames(payload.config, collectionSlug)
-        parsedData = stripVirtualFields(parsedData, virtualFieldNames)
-
-        if (verboseLogs) {
-          payload.logger.info(
-            `[payload-mcp] Parsed data for ${collectionSlug}: ${JSON.stringify(parsedData)}`,
-          )
-        }
-      } catch (_parseError) {
-        payload.logger.error(`[payload-mcp] Invalid JSON data provided: ${data}`)
-        const response = {
-          content: [{ type: 'text' as const, text: 'Error: Invalid JSON data provided' }],
-        }
-        return (collections?.[collectionSlug]?.overrideResponse?.(response, {}, req) ||
-          response) as {
-          content: Array<{
-            text: string
-            type: 'text'
-          }>
-        }
-      }
-
-      // Validate that either id or where is provided
-      if (!id && !where) {
-        payload.logger.error('[payload-mcp] Either id or where clause must be provided')
-        const response = {
-          content: [
-            { type: 'text' as const, text: 'Error: Either id or where clause must be provided' },
-          ],
-        }
-        return (collections?.[collectionSlug]?.overrideResponse?.(response, {}, req) ||
-          response) as {
-          content: Array<{
-            text: string
-            type: 'text'
-          }>
-        }
-      }
-
-      // Parse where clause if provided
-      let whereClause = {}
-      if (where) {
-        try {
-          whereClause = JSON.parse(where)
-          if (verboseLogs) {
-            payload.logger.info(`[payload-mcp] Using where clause: ${where}`)
-          }
-        } catch (_parseError) {
-          payload.logger.error(`[payload-mcp] Invalid where clause JSON: ${where}`)
-          const response = {
-            content: [{ type: 'text' as const, text: 'Error: Invalid JSON in where clause' }],
-          }
-          return (collections?.[collectionSlug]?.overrideResponse?.(response, {}, req) ||
-            response) as {
-            content: Array<{
-              text: string
-              type: 'text'
-            }>
+      if (id !== undefined) {
+        // C-conflict: optional precondition on the version the agent read.
+        if (o.ifUpdatedAt) {
+          const current = await currentUpdatedAt({ collectionSlug, id, req, user })
+          if (current !== o.ifUpdatedAt) {
+            return out(staleConflict({ action: 'update', collectionSlug, current, id, readTool, sent: o.ifUpdatedAt }))
           }
         }
-      }
-
-      // Update by ID or where clause
-      if (id) {
-        // Single document update
-        const updateOptions = {
+        const result = await payload.update({
           id,
           collection: collectionSlug,
           data: parsedData,
-          depth,
-          draft,
+          depth: o.depth,
+          draft: o.draft,
           overrideAccess: false,
-          overrideLock,
+          overrideLock: o.overrideLock,
           req,
           user,
-          ...(locale && { locale }),
-          ...(fallbackLocale && { fallbackLocale }),
-          ...(select && { select: select as SelectType }),
-        }
-
-        if (verboseLogs) {
-          payload.logger.info(`[payload-mcp] Updating single document with ID: ${id}`)
-        }
-        const result = await payload.update({
-          ...updateOptions,
-          data: parsedData,
-        } as any)
-
-        if (verboseLogs) {
-          payload.logger.info(`[payload-mcp] Successfully updated document with ID: ${id}`)
-        }
-
-        const response = {
-          content: [
+          ...(o.locale && { locale: o.locale }),
+          ...(o.fallbackLocale && { fallbackLocale: o.fallbackLocale }),
+          ...(o.select && { select: o.select as SelectType }),
+        } as never)
+        const doc = result as unknown as Record<string, unknown>
+        if (o.returnDocument || o.select) {
+          return out(
             {
-              type: 'text' as const,
-              text: `Document updated successfully in collection "${collectionSlug}"!
-Updated document:
-\`\`\`json
-${JSON.stringify(result)}
-\`\`\``,
+              content: [
+                {
+                  type: 'text',
+                  text: `Document updated successfully in collection "${collectionSlug}"!\nUpdated document:\n\`\`\`json\n${JSON.stringify(result)}\n\`\`\``,
+                },
+              ],
             },
-          ],
-        }
-
-        return (collections?.[collectionSlug]?.overrideResponse?.(response, result, req) ||
-          response) as {
-          content: Array<{
-            text: string
-            type: 'text'
-          }>
-        }
-      } else {
-        // Multiple documents update
-        const updateOptions = {
-          collection: collectionSlug,
-          data: parsedData,
-          depth,
-          draft,
-          overrideAccess: false,
-          overrideLock,
-          req,
-          user,
-          where: whereClause,
-          ...(locale && { locale }),
-          ...(fallbackLocale && { fallbackLocale }),
-          ...(select && { select: select as SelectType }),
-        }
-
-        if (verboseLogs) {
-          payload.logger.info(`[payload-mcp] Updating multiple documents with where clause`)
-        }
-        const result = await payload.update({
-          ...updateOptions,
-          data: parsedData,
-        } as any)
-
-        const bulkResult = result as { docs?: unknown[]; errors?: unknown[] }
-        const docs = bulkResult.docs || []
-        const errors = bulkResult.errors || []
-
-        if (verboseLogs) {
-          payload.logger.info(
-            `[payload-mcp] Successfully updated ${docs.length} documents, ${errors.length} errors`,
+            result,
           )
         }
-
-        let responseText = `Multiple documents updated in collection "${collectionSlug}"!
-Updated: ${docs.length} documents
-Errors: ${errors.length}
----`
-
-        if (docs.length > 0) {
-          responseText += `\n\nUpdated documents:
-\`\`\`json
-${JSON.stringify(docs)}
-\`\`\``
-        }
-
-        if (errors.length > 0) {
-          responseText += `\n\nErrors:
-\`\`\`json
-${JSON.stringify(errors)}
-\`\`\``
-        }
-
-        const response = {
-          content: [
-            {
-              type: 'text' as const,
-              text: responseText,
-            },
-          ],
-        }
-
-        return (collections?.[collectionSlug]?.overrideResponse?.(
-          response,
-          { docs, errors },
-          req,
-        ) || response) as {
-          content: Array<{
-            text: string
-            type: 'text'
-          }>
-        }
+        return out(receipt({ action: 'updated', collectionSlug, doc, written }), result)
       }
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error'
-      payload.logger.error(
-        `[payload-mcp] Error updating resource in ${collectionSlug}: ${errorMessage}`,
+
+      // Bulk: per-document results; isError when any document failed (C-bulk).
+      const result = (await payload.update({
+        collection: collectionSlug,
+        data: parsedData,
+        depth: o.depth,
+        draft: o.draft,
+        overrideAccess: false,
+        overrideLock: o.overrideLock,
+        req,
+        user,
+        where: whereClause,
+        ...(o.locale && { locale: o.locale }),
+        ...(o.fallbackLocale && { fallbackLocale: o.fallbackLocale }),
+        ...(o.select && { select: o.select as SelectType }),
+      } as never)) as { docs?: Record<string, unknown>[]; errors?: { id?: unknown; message?: string }[] }
+      const docs = result.docs || []
+      const errors = result.errors || []
+      const items = [
+        ...docs.map((d) => ({ id: d.id, ok: true, updatedAt: d.updatedAt })),
+        ...errors.map((e) => ({ id: e.id, error: e.message, ok: false })),
+      ]
+      const head =
+        errors.length === 0
+          ? `Updated ${docs.length} document(s) in "${collectionSlug}".`
+          : `PARTIAL: updated ${docs.length} document(s) in "${collectionSlug}"; ${errors.length} failed and were NOT changed (the others stay changed).`
+      const body = o.returnDocument ? `\n\`\`\`json\n${JSON.stringify({ docs, errors })}\n\`\`\`` : `\n${JSON.stringify({ results: items })}`
+      return out(
+        { content: [{ type: 'text', text: head + body }], ...(errors.length ? { isError: true } : {}) },
+        { docs, errors },
       )
-
-      const response = {
-        content: [
-          {
-            type: 'text' as const,
-            text: `Error updating resource in collection "${collectionSlug}": ${errorMessage}`,
-          },
-        ],
+    } catch (error) {
+      if (id !== undefined && isLockedError(error)) {
+        const info = await lockInfo({ collectionSlug, id, req, user })
+        return out(lockConflict({ action: 'update', collectionSlug, id, info, readTool }))
       }
-
-      return (collections?.[collectionSlug]?.overrideResponse?.(response, {}, req) || response) as {
-        content: Array<{
-          text: string
-          type: 'text'
-        }>
-      }
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+      payload.logger.error(`[payload-mcp] Error updating resource in ${collectionSlug}: ${errorMessage}`)
+      return out(errorResponse(`Error updating resource in collection "${collectionSlug}": ${errorMessage}`))
     }
   }
 
   if (collections?.[collectionSlug]?.enabled) {
     const convertedFields = convertCollectionSchemaToZod(schema)
+    const fieldShape = convertedFields.partial().shape as Record<string, z.ZodTypeAny>
+    // C-args: fields whose names collide with an operation argument are only reachable through `data`.
+    const flatFields = Object.fromEntries(Object.entries(fieldShape).filter(([k]) => !OPERATION_ARGS.includes(k)))
+    const colliding = Object.keys(fieldShape).filter((k) => OPERATION_ARGS.includes(k))
 
-    // Create a new schema that combines the converted fields with update-specific parameters
-    // Use .partial() to make all fields optional for partial updates
     const updateResourceSchema = z.object({
-      ...convertedFields.partial().shape,
-      id: z.union([z.string(), z.number()]).optional().describe('The ID of the document to update'),
-      depth: z
-        .number()
-        .optional()
-        .default(0)
-        .describe('How many levels deep to populate relationships'),
-      draft: z
+      ...flatFields,
+      all: z
         .boolean()
         .optional()
         .default(false)
-        .describe('Whether to update the document as a draft'),
+        .describe('Required to update every document with an empty where clause'),
+      data: z
+        .object(fieldShape)
+        .partial()
+        .optional()
+        .describe(
+          colliding.length
+            ? `Document fields to write. Fields named ${colliding.join(', ')} can only be written here (the top-level names are operation arguments).`
+            : 'Document fields to write (alternative to passing them at the top level)',
+        ),
+      depth: z.number().int().min(0).max(10).optional().default(0).describe('How many levels deep to populate relationships'),
+      draft: z.boolean().optional().default(false).describe('Whether to update the document as a draft'),
       fallbackLocale: z
         .string()
         .optional()
         .describe('Optional: fallback locale code to use when requested locale is not available'),
+      id: z.union([z.string(), z.number()]).optional().describe('The ID of the document to update'),
+      ifUpdatedAt: z
+        .string()
+        .optional()
+        .describe(
+          'Recommended for edits based on an earlier read: the updatedAt you read. If the document changed since, nothing is written and you get the current updatedAt',
+        ),
       locale: z
         .string()
         .optional()
-        .describe(
-          'Optional: locale code to update the document in (e.g., "en", "es"). Defaults to the default locale',
-        ),
+        .describe('Optional: locale code to update the document in (e.g., "en", "es"). Defaults to the default locale'),
       overrideLock: z
         .boolean()
         .optional()
-        .default(true)
-        .describe('Whether to override document locks'),
+        .default(false)
+        .describe(
+          'Default false: a document another user has open for editing is not changed, and you are told who has it. True takes over their editing session and discards their lock; only when the user asked for that',
+        ),
+      returnDocument: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe('Return the whole updated document instead of a compact receipt'),
       select: z
         .record(z.string(), z.unknown())
         .optional()
-        .describe(
-          "Optional: define exactly which fields you'd like to return in the response, e.g., {\"title\": true}",
-        ),
-      where: z
-        .string()
-        .optional()
-        .describe('JSON string for where clause to update multiple documents'),
+        .describe("Optional: define exactly which fields you'd like to return in the response, e.g., {\"title\": true}"),
+      where: z.string().optional().describe('JSON string for where clause to update multiple documents'),
     })
 
     server.registerTool(
-      `update${collectionSlug.charAt(0).toUpperCase() + toCamelCase(collectionSlug).slice(1)}`,
+      toolName(collectionSlug, 'update'),
       {
+        annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: false, readOnlyHint: false },
         description: `${collections?.[collectionSlug]?.description || toolSchemas.updateResource.description.trim()}`,
         inputSchema: updateResourceSchema.shape,
       },
       async (params: Record<string, unknown>) => {
         const {
-          id,
+          all,
+          data,
           depth,
           draft,
           fallbackLocale,
+          id,
+          ifUpdatedAt,
           locale,
           overrideLock,
+          returnDocument,
           select,
           where,
-          ...fieldData
+          ...flat
         } = params
-        // Convert field data back to JSON string format expected by the tool
-        const data = JSON.stringify(fieldData)
-        return await tool(
-          data,
-          id as number | string | undefined,
-          where as string | undefined,
-          draft as boolean,
-          depth as number,
-          overrideLock as boolean,
-          locale as string | undefined,
-          fallbackLocale as string | undefined,
-          select as Record<string, unknown> | undefined,
-        )
+        return await tool({
+          all: Boolean(all),
+          data: { ...flat, ...((data as Record<string, unknown>) || {}) },
+          depth: (depth as number) ?? 0,
+          draft: Boolean(draft),
+          fallbackLocale: fallbackLocale as string | undefined,
+          id: id as number | string | undefined,
+          ifUpdatedAt: ifUpdatedAt as string | undefined,
+          locale: locale as string | undefined,
+          overrideLock: Boolean(overrideLock),
+          returnDocument: Boolean(returnDocument),
+          select: select as Record<string, unknown> | undefined,
+          where: where as string | undefined,
+        })
       },
     )
   }
