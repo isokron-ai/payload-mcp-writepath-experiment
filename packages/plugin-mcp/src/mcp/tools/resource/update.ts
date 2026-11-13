@@ -14,6 +14,7 @@ import {
 import { convertCollectionSchemaToZod } from '../../../utils/schemaConversion/convertCollectionSchemaToZod.js'
 import { transformPointDataToPayload } from '../../../utils/transformPointDataToPayload.js'
 import {
+  currentDocument,
   currentUpdatedAt,
   errorResponse,
   isLockedError,
@@ -98,13 +99,13 @@ export const updateResourceTool = (
         if (o.ifUpdatedAt) {
           const current = await currentUpdatedAt({ collectionSlug, id, req, user })
           if (current !== o.ifUpdatedAt) {
-            return out(staleConflict({ action: 'update', collectionSlug, current, id, readTool, sent: o.ifUpdatedAt }))
+            return out(staleConflict({ action: 'update', collectionSlug, current, currentDoc: await currentDocument({ collectionSlug, id, req, user }), id, readTool, sent: o.ifUpdatedAt }))
           }
         } else {
           // C-readversion: no explicit precondition: the version this user last read is the precondition.
           const stale = await readVersionCheck({ collectionSlug, id, req, user })
           if (stale) {
-            return out(staleConflict({ action: 'update', collectionSlug, current: stale.current, id, readTool, sent: stale.seen }))
+            return out(staleConflict({ action: 'update', collectionSlug, current: stale.current, currentDoc: await currentDocument({ collectionSlug, id, req, user }), id, readTool, sent: stale.seen }))
           }
         }
         const result = await payload.update({
@@ -173,7 +174,7 @@ export const updateResourceTool = (
     } catch (error) {
       if (id !== undefined && isLockedError(error)) {
         const info = await lockInfo({ collectionSlug, id, req, user })
-        return out(lockConflict({ action: 'update', collectionSlug, id, info, readTool }))
+        return out(lockConflict({ action: 'update', collectionSlug, current: await currentDocument({ collectionSlug, id, req, user }), id, info, readTool }))
       }
       const errorMessage = error instanceof Error ? error.message : 'Unknown error'
       payload.logger.error(`[payload-mcp] Error updating resource in ${collectionSlug}: ${errorMessage}`)

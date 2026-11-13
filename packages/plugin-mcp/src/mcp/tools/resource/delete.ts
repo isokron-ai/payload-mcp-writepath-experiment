@@ -7,6 +7,7 @@ import type { MCPPluginConfig } from '../../../types.js'
 
 import { toCamelCase } from '../../../utils/camelCase.js'
 import {
+  currentDocument,
   currentUpdatedAt,
   errorResponse,
   isLockedError,
@@ -86,12 +87,12 @@ export const deleteResourceTool = (
         if (o.ifUpdatedAt) {
           const current = await currentUpdatedAt({ collectionSlug, id, req, user })
           if (current !== o.ifUpdatedAt) {
-            return out(staleConflict({ action: 'delete', collectionSlug, current, id, readTool, sent: o.ifUpdatedAt }))
+            return out(staleConflict({ action: 'delete', collectionSlug, current, currentDoc: await currentDocument({ collectionSlug, id, req, user }), id, readTool, sent: o.ifUpdatedAt }))
           }
         } else {
           const stale = await readVersionCheck({ collectionSlug, id, req, user })
           if (stale) {
-            return out(staleConflict({ action: 'delete', collectionSlug, current: stale.current, id, readTool, sent: stale.seen }))
+            return out(staleConflict({ action: 'delete', collectionSlug, current: stale.current, currentDoc: await currentDocument({ collectionSlug, id, req, user }), id, readTool, sent: stale.seen }))
           }
         }
         const result = (await payload.delete(deleteOptions as never)) as unknown as Record<string, unknown>
@@ -132,7 +133,7 @@ export const deleteResourceTool = (
     } catch (error) {
       if (id !== undefined && isLockedError(error)) {
         const info = await lockInfo({ collectionSlug, id, req, user })
-        return out(lockConflict({ action: 'delete', collectionSlug, id, info, readTool }))
+        return out(lockConflict({ action: 'delete', collectionSlug, current: await currentDocument({ collectionSlug, id, req, user }), id, info, readTool }))
       }
       const errorMessage = error instanceof Error ? error.message : 'Unknown error'
       payload.logger.error(`[payload-mcp] Error deleting resource from ${collectionSlug}: ${errorMessage}`)

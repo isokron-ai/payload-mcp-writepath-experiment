@@ -81,19 +81,41 @@ export async function currentUpdatedAt(args: {
   }
 }
 
+/** The document as it is now (depth 0, latest draft), carried in conflict answers so a retry can be informed. */
+export async function currentDocument(args: {
+  collectionSlug: string
+  id: number | string
+  req: PayloadRequest
+  user: TypedUser
+}): Promise<null | Record<string, unknown>> {
+  try {
+    return (await args.req.payload.findByID({
+      id: args.id,
+      collection: args.collectionSlug,
+      depth: 0,
+      draft: true,
+      overrideAccess: false,
+      user: args.user,
+    })) as unknown as Record<string, unknown>
+  } catch {
+    return null
+  }
+}
+
 export function lockConflict(args: {
   action: 'delete' | 'update'
   collectionSlug: string
+  current?: null | Record<string, unknown>
   id: number | string
   info: { documentUpdatedAt: null | string; lockedBy: null | string; lockedSince: null | string }
   readTool: string
 }): ToolResponse {
   const { action, collectionSlug, id, info, readTool } = args
   const who = info.lockedBy ?? 'another user'
-  const structured = { conflict: 'locked', collection: collectionSlug, id, ...info, applied: false }
+  const structured = { conflict: 'locked', collection: collectionSlug, id, ...info, applied: false, currentDocument: args.current ?? null }
   return errorResponse(
     `Conflict: ${collectionSlug} ${id} is open for editing by ${who}${info.lockedSince ? ` (lock refreshed ${info.lockedSince})` : ''}. ` +
-      `Your ${action} was NOT applied. They may save their own changes, so re-read the document with ${readTool} ` +
+      `Your ${action} was NOT applied. The current document is below (currentDocument); they may save more changes, so re-read it with ${readTool} ` +
       `before trying again, then re-apply only your change to the current version (pass ifUpdatedAt with the updatedAt you read). ` +
       `If it is still locked, tell the user who is editing it. Pass overrideLock: true only if the user explicitly asked you to take over their editing session.\n` +
       JSON.stringify(structured),
@@ -104,16 +126,17 @@ export function staleConflict(args: {
   action: 'delete' | 'update'
   collectionSlug: string
   current: null | string
+  currentDoc?: null | Record<string, unknown>
   id: number | string
   readTool: string
   sent: string
 }): ToolResponse {
   const { action, collectionSlug, current, id, readTool, sent } = args
-  const structured = { conflict: 'stale', collection: collectionSlug, id, ifUpdatedAt: sent, documentUpdatedAt: current, applied: false }
+  const structured = { conflict: 'stale', collection: collectionSlug, id, ifUpdatedAt: sent, documentUpdatedAt: current, applied: false, currentDocument: args.currentDoc ?? null }
   return errorResponse(
     `Conflict: ${collectionSlug} ${id} changed since you read it (you sent ifUpdatedAt ${sent}; it is now ${current ?? 'gone'}). ` +
-      `Your ${action} was NOT applied. Re-read it with ${readTool}, re-apply only your own change to the current version, ` +
-      `and retry with ifUpdatedAt ${current ?? '<the new updatedAt>'}.\n` +
+      `Your ${action} was NOT applied. The current document is below (currentDocument): re-apply only your own change to it ` +
+      `(or re-read it with ${readTool}) and retry with ifUpdatedAt ${current ?? '<the new updatedAt>'}.\n` +
       JSON.stringify(structured),
   )
 }
