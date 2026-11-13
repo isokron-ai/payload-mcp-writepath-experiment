@@ -342,3 +342,44 @@ export function bulkAnswer(args: {
     : `\n${JSON.stringify(summary)}`
   return { content: [{ type: 'text', text: head + body }], ...(notChanged ? { isError: true } : {}) }
 }
+
+/**
+ * C-readversion with select (research v2.1): the read-version memory needs each document's updatedAt and createdAt.
+ * A find with an inclusion select that leaves them out (e.g. {title, items, updatedAt}) used to record nothing usable,
+ * so the next write by that user had no precondition. The query asks for both; the answer is unchanged (the fields
+ * the agent did not ask for are removed again before the document is shown).
+ */
+const VERSION_FIELDS = ['createdAt', 'updatedAt']
+
+export function versionSelect(select?: Record<string, unknown>): { added: string[]; select?: Record<string, unknown> } {
+  if (!select || typeof select !== 'object' || Object.keys(select).length === 0) {
+    return { added: [], select }
+  }
+  const inclusion = Object.values(select).some((v) => v !== false)
+  const out: Record<string, unknown> = { ...select }
+  const added: string[] = []
+  for (const f of VERSION_FIELDS) {
+    if (inclusion && out[f] !== true) {
+      out[f] = true
+      added.push(f)
+    } else if (!inclusion && out[f] === false) {
+      delete out[f]
+      added.push(f)
+    }
+  }
+  return { added, select: out }
+}
+
+export function stripAdded<T>(docs: T[], added: string[]): T[] {
+  if (!added.length) {
+    return docs
+  }
+  for (const d of docs) {
+    if (d && typeof d === 'object') {
+      for (const f of added) {
+        delete (d as Record<string, unknown>)[f]
+      }
+    }
+  }
+  return docs
+}

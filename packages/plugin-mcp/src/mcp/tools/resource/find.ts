@@ -4,7 +4,7 @@ import type { JoinQuery, PayloadRequest, PopulateType, SelectType, TypedUser } f
 import type { MCPPluginConfig } from '../../../types.js'
 
 import { toCamelCase } from '../../../utils/camelCase.js'
-import { rememberRead } from '../../helpers/writeSafety.js'
+import { rememberRead, stripAdded, versionSelect } from '../../helpers/writeSafety.js'
 import { toolSchemas } from '../schemas.js'
 
 export const findResourceTool = (
@@ -37,6 +37,9 @@ export const findResourceTool = (
     }>
   }> => {
     const payload = req.payload
+    // C-readversion with select (v2.1): always fetch the version fields the read-version memory needs.
+    const vs = versionSelect(select)
+    const querySelect = vs.select
 
     if (verboseLogs) {
       payload.logger.info(
@@ -75,7 +78,7 @@ export const findResourceTool = (
             id,
             collection: collectionSlug,
             depth,
-            ...(select && { select: select as SelectType }),
+            ...(querySelect && { select: querySelect as SelectType }),
             ...(populate && { populate: populate as PopulateType }),
             ...(joins !== undefined && { joins: joins as JoinQuery }),
             overrideAccess: false,
@@ -88,6 +91,7 @@ export const findResourceTool = (
           })
 
           rememberRead(user, collectionSlug, [doc])
+          stripAdded([doc], vs.added)
           if (verboseLogs) {
             payload.logger.info(`[payload-mcp] Found document with ID: ${id}`)
           }
@@ -140,7 +144,7 @@ ${JSON.stringify(doc)}`,
         page,
         req,
         user,
-        ...(select && { select: select as SelectType }),
+        ...(querySelect && { select: querySelect as SelectType }),
         ...(populate && { populate: populate as PopulateType }),
         ...(joins !== undefined && { joins: joins as JoinQuery }),
         ...(locale && { locale }),
@@ -160,6 +164,7 @@ ${JSON.stringify(doc)}`,
 
       const result = await payload.find(findOptions)
       rememberRead(user, collectionSlug, result.docs)
+      stripAdded(result.docs, vs.added)
 
       if (verboseLogs) {
         payload.logger.info(
