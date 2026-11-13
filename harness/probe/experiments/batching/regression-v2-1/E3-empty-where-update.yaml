@@ -1,0 +1,47 @@
+format: isokron/probe-experiment@1
+id: E3-empty-where-update-research-v2-1
+run_id: v21-re3
+candidate: F3
+title: updateTasks with where "{}"
+hypothesis: >-
+  updateTasks {where: "{}", owner: "Zed"} passes the id-or-where guard and changes every task the hook allows (17 of
+  20; the 3 archived refuse); REST PATCH /api/tasks with no where is refused with HTTP 400.
+arms:
+  - name: test
+    role: test
+    description: MCP updateTasks with where "{}"
+    reps: 5
+    reset: [task]
+    steps:
+      - { id: w, kind: call, tool: updateTasks, args: { where: '{}', owner: 'Zed' } }
+      - { id: after, kind: read, object: { path: '/api/tasks?where[owner][equals]=Zed&limit=0&depth=0' } }
+    counters:
+      all_changed: 'after.obj.totalDocs == 17'
+      any_changed: 'after.obj.totalDocs > 0'
+      flagged_error: 'w.isError'
+    columns: { changed: after.obj.totalDocs, head: w.text }
+  - name: emptystring
+    role: discriminating
+    description: an empty where string is refused by the guard (the guard exists)
+    reps: 2
+    reset: [task]
+    steps:
+      - { id: w, kind: call, tool: updateTasks, args: { where: '', owner: 'Zed' } }
+      - { id: after, kind: read, object: { path: '/api/tasks?where[owner][equals]=Zed&limit=0&depth=0' } }
+    counters:
+      refused: { all: ['after.obj.totalDocs == 0', "w.text contains 'must be provided'"] }
+  - name: control
+    role: control
+    description: REST PATCH /api/tasks with no where
+    reps: 5
+    reset: [task]
+    steps:
+      - { id: w, kind: http, method: PATCH, path: /api/tasks, body: { owner: 'Zed' }, content_type: application/json }
+      - { id: after, kind: read, object: { path: '/api/tasks?where[owner][equals]=Zed&limit=0&depth=0' } }
+    counters:
+      refused_400: 'w.status == 400'
+      any_changed: 'after.obj.totalDocs > 0'
+verdict:
+  criterion: reproduced if every valid MCP repetition changed all 17 changeable tasks while REST refused every time with 400 and changed none, and the empty-string guard refused; not reproduced if no MCP repetition changed any task; otherwise inconclusive.
+  reproduced: { all: ['test.valid >= 3', 'test.all_changed == test.valid', 'control.valid >= 3', 'control.refused_400 == control.valid', 'control.any_changed == 0', 'emptystring.refused == emptystring.valid', 'emptystring.valid >= 1'] }
+  not_reproduced: { all: ['test.valid >= 3', 'test.any_changed == 0'] }

@@ -1,0 +1,58 @@
+format: isokron/probe-experiment@1
+id: E1-lock-update-research
+run_id: re1-001
+candidate: F1
+title: updatePosts by id while another user holds the document lock
+hypothesis: >-
+  updatePosts {id, title} with no overrideLock, while editor-b holds a fresh lock on the post, changes the post,
+  answers with its success text and removes editor-b's lock row; REST PATCH by the same user under the same lock is
+  refused with HTTP 423.
+arms:
+  - name: test
+    role: test
+    description: MCP updatePosts by id, default arguments, editor-b's lock in place (target hold_locks)
+    reps: 10
+    reset: [post]
+    steps:
+      - { id: before, kind: read, object: post, require: 'before.obj.lock_count == 1' }
+      - { id: w, kind: call, tool: updatePosts, args: { id: 2, title: 'MCP edit {{REP}}' } }
+      - { id: after, kind: read, object: post }
+    counters:
+      written: "after.obj.doc.title.en == 'MCP edit {{REP}}'"
+      said_success: "w.text contains 'updated successfully'"
+      lock_removed: 'after.obj.lock_count == 0'
+      flagged_error: 'w.isError'
+    columns: { title: after.obj.doc.title.en, locks_after: after.obj.lock_count, head: w.text }
+  - name: optout
+    role: discriminating
+    description: the same call with overrideLock false must be refused (the lock really is in force)
+    reps: 3
+    reset: [post]
+    steps:
+      - { id: before, kind: read, object: post, require: 'before.obj.lock_count == 1' }
+      - { id: w, kind: call, tool: updatePosts, args: { id: 2, title: 'MCP opt-out {{REP}}', overrideLock: false } }
+      - { id: after, kind: read, object: post }
+    counters:
+      refused: { all: ["after.obj.doc.title.en != 'MCP opt-out {{REP}}'", "w.text contains 'locked'"] }
+      flagged_error: 'w.isError'
+  - name: control
+    role: control
+    description: REST PATCH /api/posts/2 as editor-a under editor-b's lock
+    reps: 10
+    reset: [post]
+    steps:
+      - { id: before, kind: read, object: post, require: 'before.obj.lock_count == 1' }
+      - { id: w, kind: http, method: PATCH, path: /api/posts/2, body: { title: 'REST edit {{REP}}' }, content_type: application/json }
+      - { id: after, kind: read, object: post }
+    counters:
+      written: "after.obj.doc.title.en == 'REST edit {{REP}}'"
+      refused_423: 'w.status == 423'
+      lock_removed: 'after.obj.lock_count == 0'
+verdict:
+  criterion: >-
+    reproduced if the MCP update wrote through the lock and removed it in every valid repetition (test.written ==
+    test.valid, test.lock_removed == test.valid, at least 5) while REST refused every time with 423 and kept the lock
+    (control.refused_423 == control.valid, control.written == 0) and the opt-out arm was refused every time; not
+    reproduced if the MCP update never wrote through the lock; otherwise inconclusive.
+  reproduced: { all: ['test.valid >= 5', 'test.written == test.valid', 'test.lock_removed == test.valid', 'control.valid >= 5', 'control.refused_423 == control.valid', 'control.written == 0', 'optout.valid >= 1', 'optout.refused == optout.valid'] }
+  not_reproduced: { all: ['test.valid >= 5', 'test.written == 0'] }

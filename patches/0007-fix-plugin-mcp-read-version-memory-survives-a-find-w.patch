@@ -1,0 +1,131 @@
+From f471e2e7c60b67c46c0dd617d0704cb14cf68f82 Mon Sep 17 00:00:00 2001
+From: Joshua Bryan <45343084+rafe-walker@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 12:24:39 -0700
+Subject: [PATCH 7/7] fix(plugin-mcp): read-version memory survives a find with
+ select (research v2.1)
+
+The read-version precondition keys each document by (user, collection, id, createdAt) and needs updatedAt. A find
+with an inclusion select that leaves createdAt or updatedAt out (seen in an agent run of the batching
+series: select {title, items, updatedAt}) recorded the read under a key no later write looks up, so the next update by id ran with no
+precondition and another editor's change made after the read was lost. Research v1 hid this because its
+instructions had agents pass ifUpdatedAt explicitly; v2 tells them the server checks, which exposed it.
+
+find now always queries createdAt and updatedAt (added to an inclusion select, never excluded by an exclusion
+select), records the read, then removes the fields the caller did not ask for, so the answer is unchanged.
+Covers by-id and bulk writes (both use the same memory).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../plugin-mcp/src/mcp/helpers/writeSafety.ts | 41 +++++++++++++++++++
+ .../plugin-mcp/src/mcp/tools/resource/find.ts | 11 +++--
+ 2 files changed, 49 insertions(+), 3 deletions(-)
+
+diff --git a/packages/plugin-mcp/src/mcp/helpers/writeSafety.ts b/packages/plugin-mcp/src/mcp/helpers/writeSafety.ts
+index e0f9897..90ec77b 100644
+--- a/packages/plugin-mcp/src/mcp/helpers/writeSafety.ts
++++ b/packages/plugin-mcp/src/mcp/helpers/writeSafety.ts
+@@ -342,3 +342,44 @@ export function bulkAnswer(args: {
+     : `\n${JSON.stringify(summary)}`
+   return { content: [{ type: 'text', text: head + body }], ...(notChanged ? { isError: true } : {}) }
+ }
++
++/**
++ * C-readversion with select (research v2.1): the read-version memory needs each document's updatedAt and createdAt.
++ * A find with an inclusion select that leaves them out (e.g. {title, items, updatedAt}) used to record nothing usable,
++ * so the next write by that user had no precondition. The query asks for both; the answer is unchanged (the fields
++ * the agent did not ask for are removed again before the document is shown).
++ */
++const VERSION_FIELDS = ['createdAt', 'updatedAt']
++
++export function versionSelect(select?: Record<string, unknown>): { added: string[]; select?: Record<string, unknown> } {
++  if (!select || typeof select !== 'object' || Object.keys(select).length === 0) {
++    return { added: [], select }
++  }
++  const inclusion = Object.values(select).some((v) => v !== false)
++  const out: Record<string, unknown> = { ...select }
++  const added: string[] = []
++  for (const f of VERSION_FIELDS) {
++    if (inclusion && out[f] !== true) {
++      out[f] = true
++      added.push(f)
++    } else if (!inclusion && out[f] === false) {
++      delete out[f]
++      added.push(f)
++    }
++  }
++  return { added, select: out }
++}
++
++export function stripAdded<T>(docs: T[], added: string[]): T[] {
++  if (!added.length) {
++    return docs
++  }
++  for (const d of docs) {
++    if (d && typeof d === 'object') {
++      for (const f of added) {
++        delete (d as Record<string, unknown>)[f]
++      }
++    }
++  }
++  return docs
++}
+diff --git a/packages/plugin-mcp/src/mcp/tools/resource/find.ts b/packages/plugin-mcp/src/mcp/tools/resource/find.ts
+index 2fbdecc..c32ac2d 100644
+--- a/packages/plugin-mcp/src/mcp/tools/resource/find.ts
++++ b/packages/plugin-mcp/src/mcp/tools/resource/find.ts
+@@ -4,7 +4,7 @@ import type { JoinQuery, PayloadRequest, PopulateType, SelectType, TypedUser } f
+ import type { MCPPluginConfig } from '../../../types.js'
+ 
+ import { toCamelCase } from '../../../utils/camelCase.js'
+-import { rememberRead } from '../../helpers/writeSafety.js'
++import { rememberRead, stripAdded, versionSelect } from '../../helpers/writeSafety.js'
+ import { toolSchemas } from '../schemas.js'
+ 
+ export const findResourceTool = (
+@@ -37,6 +37,9 @@ export const findResourceTool = (
+     }>
+   }> => {
+     const payload = req.payload
++    // C-readversion with select (v2.1): always fetch the version fields the read-version memory needs.
++    const vs = versionSelect(select)
++    const querySelect = vs.select
+ 
+     if (verboseLogs) {
+       payload.logger.info(
+@@ -75,7 +78,7 @@ export const findResourceTool = (
+             id,
+             collection: collectionSlug,
+             depth,
+-            ...(select && { select: select as SelectType }),
++            ...(querySelect && { select: querySelect as SelectType }),
+             ...(populate && { populate: populate as PopulateType }),
+             ...(joins !== undefined && { joins: joins as JoinQuery }),
+             overrideAccess: false,
+@@ -88,6 +91,7 @@ export const findResourceTool = (
+           })
+ 
+           rememberRead(user, collectionSlug, [doc])
++          stripAdded([doc], vs.added)
+           if (verboseLogs) {
+             payload.logger.info(`[payload-mcp] Found document with ID: ${id}`)
+           }
+@@ -140,7 +144,7 @@ ${JSON.stringify(doc)}`,
+         page,
+         req,
+         user,
+-        ...(select && { select: select as SelectType }),
++        ...(querySelect && { select: querySelect as SelectType }),
+         ...(populate && { populate: populate as PopulateType }),
+         ...(joins !== undefined && { joins: joins as JoinQuery }),
+         ...(locale && { locale }),
+@@ -160,6 +164,7 @@ ${JSON.stringify(doc)}`,
+ 
+       const result = await payload.find(findOptions)
+       rememberRead(user, collectionSlug, result.docs)
++      stripAdded(result.docs, vs.added)
+ 
+       if (verboseLogs) {
+         payload.logger.info(
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,87 @@
+# MCP static sweep: mcp-typescript server on vercel 0.1.0
+
+> **Model-visible** = what the model reads (`name`, `description`, `inputSchema`); **wire** = the whole tools/list entry (icons, `_meta` and `outputSchema` included), which clients do not pass to the model. Budgets apply to model-visible tokens. Every tool is counted once, as if the full catalog were loaded: not session or task exposure.
+> `cl100k`: tiktoken cl100k\_base (reference scale; not a Claude tokenizer).
+
+|  | value |
+| --- | --- |
+| source | file `payload-mcp-3.93.0-baseline.json` (snapshot), adapter `tools-list` |
+| protocol | 2025-11-25 (requested 2025-11-25) |
+| client capabilities | `{}` |
+| catalog fingerprint | `3406b8e19fcb9813ad97ffd23627c6b576575bb0ef9a248401bdcdd8005f5cba` |
+| tools-ordered fingerprint (ADR-0005) | n/a |
+| model-visible measured as | canonical JSON (RFC 8785) of the fields clients pass to the model: name, description, inputSchema |
+| wire measured as | canonical JSON (RFC 8785) of each whole tools/list entry, icons and \_meta included |
+| generator | `mcp-catalog-snap/0.3.0` · report `mcp-catalog-snap/sweep/1` |
+
+## Totals
+
+12 tools, 0 prompts, 0 resource templates.
+
+| measure | bytes | cl100k tokens |
+| --- | ---: | ---: |
+| **model-visible (all tools)** | 18,512 | 4,031 |
+| model-visible fields, each tokenized on its own (sum) | 17,996 | 3,935 |
+| wire (whole tools/list entries) | 18,992 | 4,127 |
+| field `name` | 138 | 28 |
+| field `description` | 660 | 135 |
+| field `inputSchema` | 17,198 | 3,772 |
+| field `other` | 492 | 108 |
+
+The whole-object figure tokenizes one JSON object per tool (keys, quotes and the description's JSON escaping count, and tokens merge across field boundaries); the field rows tokenize each field on its own (name and description as raw text). The two need not match; budgets use the whole-object figure.
+
+Per-tool model-visible (cl100k): median 263, p90 518, max 562.
+
+## Budget
+
+No budget set (advisory per-tool threshold: 5,000 cl100k model-visible tokens). Set `--max-tool-tokens` / `--max-catalog-tokens` to fail CI (exit 4). Budgets apply to model-visible tokens.
+
+## Findings
+
+| rule | what | findings | tools | error / warn / info |
+| --- | --- | ---: | ---: | ---: |
+| `untyped-node` | schema nodes that accept anything ({} / items: {} / opaque objects) | 9 | 9 | 0 / 0 / 9 |
+| `annotations-missing` | no readOnlyHint / destructiveHint annotation | 12 | 12 | 0 / 0 / 12 |
+
+Enum / const-union sizes: 0-5: 6 · 6-10: 0 · 11-20: 0 · 21-50: 0 · 51-100: 0 · 101-500: 0 · 501+: 0
+
+## Largest tools (model-visible cl100k)
+
+| # | tool | model-visible cl100k tokens | model-visible bytes | wire bytes | dup % | largest enum | findings |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | `updatePosts` | 562 | 2,509 | 2,549 | 0 | 4 | 2 |
+| 2 | `createPosts` | 518 | 2,271 | 2,311 | 0 | 4 | 2 |
+| 3 | `findListings` | 475 | 2,199 | 2,239 | 0 | 0 | 2 |
+| 4 | `findPosts` | 474 | 2,196 | 2,236 | 0 | 0 | 2 |
+| 5 | `findTasks` | 474 | 2,196 | 2,236 | 0 | 0 | 2 |
+| 6 | `updateTasks` | 289 | 1,346 | 1,386 | 0 | 3 | 2 |
+| 7 | `updateListings` | 263 | 1,237 | 1,277 | 0 | 0 | 2 |
+| 8 | `createTasks` | 243 | 1,101 | 1,141 | 0 | 3 | 2 |
+| 9 | `createListings` | 219 | 997 | 1,037 | 0 | 0 | 2 |
+| 10 | `deleteListings` | 172 | 822 | 862 | 0 | 0 | 1 |
+| 11 | `deletePosts` | 171 | 819 | 859 | 0 | 0 | 1 |
+| 12 | `deleteTasks` | 171 | 819 | 859 | 0 | 0 | 1 |
+
+## Examples
+
+### `untyped-node`
+
+- **info** `createListings` `/inputSchema`: 2 untyped node(s): 1 with no type, 0 items: {}, 1 opaque object(s)
+- **info** `createPosts` `/inputSchema`: 2 untyped node(s): 1 with no type, 0 items: {}, 1 opaque object(s)
+- **info** `createTasks` `/inputSchema`: 2 untyped node(s): 1 with no type, 0 items: {}, 1 opaque object(s)
+- **info** `findListings` `/inputSchema`: 6 untyped node(s): 3 with no type, 0 items: {}, 3 opaque object(s)
+- **info** `findPosts` `/inputSchema`: 6 untyped node(s): 3 with no type, 0 items: {}, 3 opaque object(s)
+- … 4 more in the JSON report
+
+### `annotations-missing`
+
+- **info** `createListings`: no readOnlyHint or destructiveHint; clients must assume the tool may destroy data
+- **info** `createPosts`: no readOnlyHint or destructiveHint; clients must assume the tool may destroy data
+- **info** `createTasks`: no readOnlyHint or destructiveHint; clients must assume the tool may destroy data
+- **info** `deleteListings`: no readOnlyHint or destructiveHint; clients must assume the tool may destroy data
+- **info** `deletePosts`: no readOnlyHint or destructiveHint; clients must assume the tool may destroy data
+- … 7 more in the JSON report
+
+## Notes
+
+- input is a snapshot: tools are stored sorted, so the server-order (ADR-0005) fingerprint is unavailable

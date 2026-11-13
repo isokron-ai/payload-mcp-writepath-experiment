@@ -1,0 +1,6 @@
+{
+ "sha256": "b92aa26f57bff83e0592440ce7c837b954b28e546fa10783ad83ecb737738712",
+ "objects": 40,
+ "target": "payload-locked.yaml",
+ "note": "state hash after the adapter seed (sandbox/seed.mjs + hold_locks)"
+}

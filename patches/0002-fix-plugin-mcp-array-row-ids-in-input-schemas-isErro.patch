@@ -1,0 +1,219 @@
+From 6209ce3fa5c96f5e76469f12c81b7545f30e00d4 Mon Sep 17 00:00:00 2001
+From: Joshua Bryan <45343084+rafe-walker@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 23:20:15 -0700
+Subject: [PATCH 2/7] fix(plugin-mcp): array row ids in input schemas; isError
+ and receipts in create and find; default instructions
+
+Array rows keep their optional id in the input schemas (see payloadcms/payload#19435 and #18063). Create gets
+the data argument and compact receipts; find sets isError on its error answers; tool annotations; default server
+instructions describing the write contract when the app sets none.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ packages/plugin-mcp/src/mcp/getMcpHandler.ts  | 12 +++++-
+ .../src/mcp/tools/resource/create.ts          | 40 ++++++++++++-------
+ .../plugin-mcp/src/mcp/tools/resource/find.ts |  8 +++-
+ .../schemaConversion/sanitizeJsonSchema.ts    | 13 ++++--
+ 4 files changed, 51 insertions(+), 22 deletions(-)
+
+diff --git a/packages/plugin-mcp/src/mcp/getMcpHandler.ts b/packages/plugin-mcp/src/mcp/getMcpHandler.ts
+index 9e3dc83..3162419 100644
+--- a/packages/plugin-mcp/src/mcp/getMcpHandler.ts
++++ b/packages/plugin-mcp/src/mcp/getMcpHandler.ts
+@@ -528,7 +528,17 @@ export const getMcpHandler = (
+         }
+       },
+       {
+-        instructions: serverOptions.instructions,
++        // C-instructions: a short default contract for writes when the app sets none.
++        instructions:
++          serverOptions.instructions ??
++          [
++            'Payload CMS content tools. Writes are partial: send only the fields you change.',
++            'Editing what you read: pass ifUpdatedAt (the updatedAt you read) to update/delete; a "Conflict" answer means nothing was written: re-read, re-apply only your change, retry.',
++            'Documents another user has open are locked: you get a Conflict naming them; do not pass overrideLock unless the user asked to take over.',
++            'Array rows carry an id: keep the ids of rows you keep, so their other-locale values survive; rows without an id are new.',
++            'Bulk writes report per document; "PARTIAL" means some failed and the rest stayed changed. An empty where is refused unless all: true.',
++            'Write answers are compact receipts; pass returnDocument: true for the whole document.',
++          ].join('\n'),
+         serverInfo: serverOptions.serverInfo,
+       },
+       {
+diff --git a/packages/plugin-mcp/src/mcp/tools/resource/create.ts b/packages/plugin-mcp/src/mcp/tools/resource/create.ts
+index 2cf3667..95ef8fc 100644
+--- a/packages/plugin-mcp/src/mcp/tools/resource/create.ts
++++ b/packages/plugin-mcp/src/mcp/tools/resource/create.ts
+@@ -13,6 +13,7 @@ import {
+ } from '../../../utils/getVirtualFieldNames.js'
+ import { convertCollectionSchemaToZod } from '../../../utils/schemaConversion/convertCollectionSchemaToZod.js'
+ import { transformPointDataToPayload } from '../../../utils/transformPointDataToPayload.js'
++import { errorResponse, OPERATION_ARGS, receipt } from '../../helpers/writeSafety.js'
+ import { toolSchemas } from '../schemas.js'
+ export const createResourceTool = (
+   server: McpServer,
+@@ -30,6 +31,7 @@ export const createResourceTool = (
+     locale?: string,
+     fallbackLocale?: string,
+     select?: Record<string, unknown>,
++    returnDocument: boolean = false,
+   ): Promise<{
+     content: Array<{
+       text: string
+@@ -63,9 +65,7 @@ export const createResourceTool = (
+         }
+       } catch (_parseError) {
+         payload.logger.error(`[payload-mcp] Invalid JSON data provided: ${data}`)
+-        return {
+-          content: [{ type: 'text' as const, text: 'Error: Invalid JSON data provided' }],
+-        }
++        return errorResponse('Error: Invalid JSON data provided')
+       }
+ 
+       // Create the resource
+@@ -88,7 +88,9 @@ export const createResourceTool = (
+         )
+       }
+ 
+-      const response = {
++      const response = !returnDocument && !select
++        ? receipt({ action: 'created', collectionSlug, doc: result as unknown as Record<string, unknown>, written: Object.keys(parsedData) })
++        : {
+         content: [
+           {
+             type: 'text' as const,
+@@ -114,14 +116,7 @@ ${JSON.stringify(result)}
+         `[payload-mcp] Error creating resource in ${collectionSlug}: ${errorMessage}`,
+       )
+ 
+-      const response = {
+-        content: [
+-          {
+-            type: 'text' as const,
+-            text: `Error creating resource in collection "${collectionSlug}": ${errorMessage}`,
+-          },
+-        ],
+-      }
++      const response = errorResponse(`Error creating resource in collection "${collectionSlug}": ${errorMessage}`)
+ 
+       return (collections?.[collectionSlug]?.overrideResponse?.(response, {}, req) || response) as {
+         content: Array<{
+@@ -136,8 +131,21 @@ ${JSON.stringify(result)}
+     const convertedFields = convertCollectionSchemaToZod(schema)
+ 
+     // Create a new schema that combines the converted fields with create-specific parameters
++    // C-args: fields named like an operation argument are written through `data` only.
++    const shape = convertedFields.shape as Record<string, z.ZodTypeAny>
++    const colliding = Object.keys(shape).filter((k) => OPERATION_ARGS.includes(k))
+     const createResourceSchema = z.object({
+-      ...convertedFields.shape,
++      ...Object.fromEntries(Object.entries(shape).filter(([k]) => !OPERATION_ARGS.includes(k))),
++      ...(colliding.length
++        ? {
++            data: z
++              .object(Object.fromEntries(colliding.map((k) => [k, shape[k]!])))
++              .partial()
++              .optional()
++              .describe(`Document fields named ${colliding.join(', ')}: write them here (the top-level names are operation arguments).`),
++          }
++        : {}),
++      returnDocument: z.boolean().optional().default(false).describe('Return the whole created document instead of a compact receipt'),
+       depth: z
+         .number()
+         .int()
+@@ -172,12 +180,13 @@ ${JSON.stringify(result)}
+     server.registerTool(
+       `create${collectionSlug.charAt(0).toUpperCase() + toCamelCase(collectionSlug).slice(1)}`,
+       {
++        annotations: { destructiveHint: false, idempotentHint: false, openWorldHint: false, readOnlyHint: false },
+         description: `${collections?.[collectionSlug]?.description || toolSchemas.createResource.description.trim()}`,
+         inputSchema: createResourceSchema.shape,
+       },
+       async (params: Record<string, unknown>) => {
+-        const { depth, draft, fallbackLocale, locale, select, ...fieldData } = params
+-        const data = JSON.stringify(fieldData)
++        const { data: nested, depth, draft, fallbackLocale, locale, returnDocument, select, ...fieldData } = params
++        const data = JSON.stringify({ ...fieldData, ...((nested as Record<string, unknown>) || {}) })
+         return await tool(
+           data,
+           depth as number,
+@@ -185,6 +194,7 @@ ${JSON.stringify(result)}
+           locale as string | undefined,
+           fallbackLocale as string | undefined,
+           select as Record<string, unknown> | undefined,
++          Boolean(returnDocument),
+         )
+       },
+     )
+diff --git a/packages/plugin-mcp/src/mcp/tools/resource/find.ts b/packages/plugin-mcp/src/mcp/tools/resource/find.ts
+index 78b90df..7abd0c5 100644
+--- a/packages/plugin-mcp/src/mcp/tools/resource/find.ts
++++ b/packages/plugin-mcp/src/mcp/tools/resource/find.ts
+@@ -215,6 +215,7 @@ Page: ${result.page} of ${result.totalPages}
+     server.registerTool(
+       `find${collectionSlug.charAt(0).toUpperCase() + toCamelCase(collectionSlug).slice(1)}`,
+       {
++        annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false, readOnlyHint: true },
+         description: `${collections?.[collectionSlug]?.description || toolSchemas.findResources.description.trim()}`,
+         inputSchema: toolSchemas.findResources.parameters.shape,
+       },
+@@ -234,7 +235,8 @@ Page: ${result.page} of ${result.totalPages}
+         trash,
+         where,
+       }) => {
+-        return await tool(
++        // isError on every error answer of this tool: the texts are fixed, so mark them here.
++        const r = (await tool(
+           id,
+           limit,
+           page,
+@@ -249,7 +251,9 @@ Page: ${result.page} of ${result.totalPages}
+           joins,
+           trash,
+           pagination,
+-        )
++        )) as { content: Array<{ text: string; type: 'text' }>; isError?: boolean }
++        const t = r.content?.[0]?.text ?? ''
++        return /^(Error|❌)/.test(t) ? { ...r, isError: true } : r
+       },
+     )
+   }
+diff --git a/packages/plugin-mcp/src/utils/schemaConversion/sanitizeJsonSchema.ts b/packages/plugin-mcp/src/utils/schemaConversion/sanitizeJsonSchema.ts
+index 05f1080..22d48c5 100644
+--- a/packages/plugin-mcp/src/utils/schemaConversion/sanitizeJsonSchema.ts
++++ b/packages/plugin-mcp/src/utils/schemaConversion/sanitizeJsonSchema.ts
+@@ -10,12 +10,17 @@ import type { JSONSchema4 } from 'json-schema'
+  * emits a Zod union which the MCP SDK serialises back as `anyOf`, stripping
+  * the concrete `type` from the output and breaking schema introspection.
+  */
+-export function sanitizeJsonSchema(schema: JSONSchema4): JSONSchema4 {
+-  delete schema?.properties?.id
++export function sanitizeJsonSchema(schema: JSONSchema4, isRoot = true): JSONSchema4 {
++  // C-rows (#19435): only the document's own id is internal. Array rows keep their optional `id`, so an
++  // agent can address an existing row (and keep its other-locale values) instead of replacing every row.
++  if (isRoot) {
++    delete schema?.properties?.id
++  }
+   delete schema?.properties?.createdAt
+   delete schema?.properties?.updatedAt
+ 
+   if (Array.isArray(schema.required)) {
++    // ids stay optional everywhere: rows without an id are new rows
+     schema.required = schema.required.filter((field) => field !== 'id')
+     if (schema.required.length === 0) {
+       delete schema.required
+@@ -30,10 +35,10 @@ export function sanitizeJsonSchema(schema: JSONSchema4): JSONSchema4 {
+       }
+       normalizeNullableType(prop)
+       if (prop.properties) {
+-        sanitizeJsonSchema(prop)
++        sanitizeJsonSchema(prop, false)
+       }
+       if (prop.items && typeof prop.items === 'object' && !Array.isArray(prop.items)) {
+-        sanitizeJsonSchema(prop.items)
++        sanitizeJsonSchema(prop.items, false)
+       }
+     }
+   }
+-- 
+2.50.1 (Apple Git-155)
+

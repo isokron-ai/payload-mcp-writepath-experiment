@@ -1,0 +1,5 @@
+# Built and installed locally by harness/build/build.sh and pnpm; never committed.
+harness/app/node_modules/
+harness/app/.next/
+harness/build/app-*/
+harness/build/out/

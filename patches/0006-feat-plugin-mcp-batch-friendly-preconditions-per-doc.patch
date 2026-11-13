@@ -1,0 +1,495 @@
+From 9eeb23d75be9ac64fd8bda834cdf8ac7b84ced39 Mon Sep 17 00:00:00 2001
+From: Joshua Bryan <45343084+rafe-walker@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 11:46:19 -0700
+Subject: [PATCH 6/7] feat(plugin-mcp): batch-friendly preconditions:
+ per-document checks in bulk update and delete (research v2)
+
+The research build's instructions told agents to pass ifUpdatedAt on every update and delete. A where-based bulk
+call cannot carry one version per document, so agents fell back to one call per document (U11 batching 8/10 on the
+vendor build, 0/10 on research v1). The read-version precondition already covers documents the agent has read, so
+the explicit rule was redundant.
+
+- Instructions: several documents getting the same change or deletion go in ONE call with where; every update and
+  delete, bulk included, is checked per document against the version the user last read; ifUpdatedAt only pins a
+  specific version (a string with id, a map with where).
+- ifUpdatedAt accepts a per-document version map {"<id>": "<updatedAt>"}; a map alone selects the documents it names.
+  A single string with a where call is refused (nothing written).
+- Bulk update and delete check every matching document first (pinned version, else the last-read version, scoped by
+  createdAt as for by-id writes): stale documents are refused with their current state, the rest are written.
+  The answer is best-effort and says so (mode best_effort, applied and not_changed counts, per-document results);
+  headline plain, PARTIAL: (some applied) or Conflict: (none applied); isError when any document was not changed.
+
+Best-effort like the by-id check (read, then write); a true compare-and-set needs core support.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ packages/plugin-mcp/src/mcp/getMcpHandler.ts  |   5 +-
+ .../plugin-mcp/src/mcp/helpers/writeSafety.ts | 118 ++++++++++++++++++
+ .../src/mcp/tools/resource/delete.ts          |  71 +++++++----
+ .../src/mcp/tools/resource/update.ts          |  94 ++++++++------
+ 4 files changed, 225 insertions(+), 63 deletions(-)
+
+diff --git a/packages/plugin-mcp/src/mcp/getMcpHandler.ts b/packages/plugin-mcp/src/mcp/getMcpHandler.ts
+index 3162419..2a5c1ae 100644
+--- a/packages/plugin-mcp/src/mcp/getMcpHandler.ts
++++ b/packages/plugin-mcp/src/mcp/getMcpHandler.ts
+@@ -533,10 +533,11 @@ export const getMcpHandler = (
+           serverOptions.instructions ??
+           [
+             'Payload CMS content tools. Writes are partial: send only the fields you change.',
+-            'Editing what you read: pass ifUpdatedAt (the updatedAt you read) to update/delete; a "Conflict" answer means nothing was written: re-read, re-apply only your change, retry.',
++            'Several documents getting the same change or deletion: use ONE update/delete call with where (e.g. {"id":{"in":[1,2,3]}}), not one call per document.',
++            'Every update/delete, bulk included, is checked per document against the version you last read; a "Conflict" means that document was NOT written: re-apply only your change to the current version it carries, retry. Pass ifUpdatedAt only to pin a specific version (a string with id; {"<id>":"<updatedAt>"} with where).',
+             'Documents another user has open are locked: you get a Conflict naming them; do not pass overrideLock unless the user asked to take over.',
+             'Array rows carry an id: keep the ids of rows you keep, so their other-locale values survive; rows without an id are new.',
+-            'Bulk writes report per document; "PARTIAL" means some failed and the rest stayed changed. An empty where is refused unless all: true.',
++            'Bulk writes are best-effort and report per document; "PARTIAL" means some were refused or failed and NOT changed while the rest were applied. An empty where is refused unless all: true.',
+             'Write answers are compact receipts; pass returnDocument: true for the whole document.',
+           ].join('\n'),
+         serverInfo: serverOptions.serverInfo,
+diff --git a/packages/plugin-mcp/src/mcp/helpers/writeSafety.ts b/packages/plugin-mcp/src/mcp/helpers/writeSafety.ts
+index a0b6c6e..e0f9897 100644
+--- a/packages/plugin-mcp/src/mcp/helpers/writeSafety.ts
++++ b/packages/plugin-mcp/src/mcp/helpers/writeSafety.ts
+@@ -224,3 +224,121 @@ export async function readVersionCheck(args: {
+   }
+   return null
+ }
++
++/** ifUpdatedAt as a per-document version map (bulk calls): {"<id>": "<updatedAt>"}. */
++export type VersionMap = Record<string, string>
++
++export const isVersionMap = (v: unknown): v is VersionMap =>
++  !!v && typeof v === 'object' && !Array.isArray(v) && Object.values(v as object).every((x) => typeof x === 'string')
++
++/** Map keys as ids for a where clause (numeric ids on SQL adapters arrive as strings in a JSON object key). */
++export const idsOf = (versions: VersionMap): Array<number | string> =>
++  Object.keys(versions).map((k) => (/^\d+$/.test(k) ? Number(k) : k))
++
++export type BulkRefusal = {
++  conflict: 'stale'
++  currentDocument: null | Record<string, unknown>
++  documentUpdatedAt: null | string
++  id: unknown
++  ifUpdatedAt: string
++  ok: false
++  precondition: 'ifUpdatedAt' | 'last_read'
++}
++
++/**
++ * C-bulk-versions (research v2): per-document preconditions for a where-based update or delete. Every matching
++ * document is checked against the version pinned for it in `versions` (ifUpdatedAt map) or, when none is pinned,
++ * against the version this user last read (C-readversion), exactly as a write by id is. Documents that changed are
++ * refused (with their current state); the rest may be written. Best-effort (read, then write), like the by-id check.
++ */
++export async function bulkPreflight(args: {
++  collectionSlug: string
++  req: PayloadRequest
++  user: TypedUser
++  versions?: VersionMap
++  where: Record<string, unknown>
++}): Promise<{ allowed: Array<number | string>; matched: number; refused: BulkRefusal[]; unmatchedPins: string[] }> {
++  const { collectionSlug, user, versions, where } = args
++  const { docs } = (await args.req.payload.find({
++    collection: collectionSlug,
++    depth: 0,
++    draft: true,
++    overrideAccess: false,
++    pagination: false,
++    user,
++    where: where as never,
++  })) as unknown as { docs: Array<Record<string, unknown> & { createdAt?: string; id: number | string; updatedAt?: string }> }
++  const allowed: Array<number | string> = []
++  const refused: BulkRefusal[] = []
++  for (const doc of docs) {
++    const pinned = versions?.[String(doc.id)]
++    const expected = pinned ?? lastSeen.get(seenKey(user?.id, collectionSlug, doc.id, doc.createdAt))
++    if (expected && doc.updatedAt && expected !== doc.updatedAt) {
++      refused.push({
++        id: doc.id,
++        conflict: 'stale',
++        currentDocument: doc,
++        documentUpdatedAt: doc.updatedAt,
++        ifUpdatedAt: expected,
++        ok: false,
++        precondition: pinned ? 'ifUpdatedAt' : 'last_read',
++      })
++    } else {
++      allowed.push(doc.id)
++    }
++  }
++  const matchedIds = new Set(docs.map((d) => String(d.id)))
++  const unmatchedPins = Object.keys(versions || {}).filter((k) => !matchedIds.has(k))
++  return { allowed, matched: docs.length, refused, unmatchedPins }
++}
++
++/**
++ * The answer to a bulk update or delete (C-bulk, v2). Best-effort and said so: documents refused as stale or that
++ * failed were NOT changed; the others were applied and stay applied (nothing is rolled back). Headline: plain
++ * success, "PARTIAL:" (some applied, some not) or "Conflict:" (none applied because every match was refused).
++ */
++export function bulkAnswer(args: {
++  action: 'deleted' | 'updated'
++  applied: Array<Record<string, unknown>>
++  collectionSlug: string
++  errors: Array<{ id?: unknown; message?: string }>
++  readTool: string
++  refused: BulkRefusal[]
++  returnDocument: boolean
++  unmatchedPins: string[]
++}): ToolResponse {
++  const { action, applied, collectionSlug, errors, readTool, refused, unmatchedPins } = args
++  const notChanged = refused.length + errors.length
++  const items = [
++    ...applied.map((d) => (action === 'updated' ? { id: d.id, ok: true, updatedAt: d.updatedAt } : { id: d.id, ok: true })),
++    ...refused,
++    ...errors.map((e) => ({ id: e.id, error: e.message, ok: false })),
++  ]
++  const pins = Object.fromEntries(refused.map((r) => [String(r.id), r.documentUpdatedAt]))
++  const next =
++    action === 'deleted'
++      ? `check them; if they should still be deleted, retry those ids in one call with ifUpdatedAt ${JSON.stringify(pins)}`
++      : `re-apply only your change to those ids and retry them in one call with ifUpdatedAt ${JSON.stringify(pins)}`
++  const staleText = refused.length
++    ? `${refused.length} changed since you read them (conflict "stale"; currentDocument shows each one now): ${next}, or re-read them with ${readTool}`
++    : ''
++  const errText = errors.length ? `${errors.length} failed (see error)` : ''
++  const why = [staleText, errText].filter(Boolean).join('; ')
++  let head: string
++  if (notChanged === 0) {
++    head = `${action === 'deleted' ? 'Deleted' : 'Updated'} ${applied.length} document(s) ${action === 'deleted' ? 'from' : 'in'} "${collectionSlug}".`
++  } else if (applied.length === 0) {
++    head = `Conflict: nothing was ${action} in "${collectionSlug}": ${notChanged} matching document(s) NOT changed: ${why}.`
++  } else {
++    head = `PARTIAL: ${action} ${applied.length} document(s) ${action === 'deleted' ? 'from' : 'in'} "${collectionSlug}"; ${notChanged} NOT changed: ${why}. Best-effort: the ${applied.length} applied stay ${action} (nothing is rolled back).`
++  }
++  const summary: Record<string, unknown> = { mode: 'best_effort', applied: applied.length, not_changed: notChanged, results: items }
++  if (unmatchedPins.length) {
++    summary.pinsNotMatched = unmatchedPins
++    head += ` ifUpdatedAt named ${unmatchedPins.length} id(s) your where did not match; they were not touched.`
++  }
++  const body = args.returnDocument
++    ? `\n\`\`\`json\n${JSON.stringify({ mode: 'best_effort', docs: applied, refused, errors })}\n\`\`\``
++    : `\n${JSON.stringify(summary)}`
++  return { content: [{ type: 'text', text: head + body }], ...(notChanged ? { isError: true } : {}) }
++}
+diff --git a/packages/plugin-mcp/src/mcp/tools/resource/delete.ts b/packages/plugin-mcp/src/mcp/tools/resource/delete.ts
+index 47d2779..f640d60 100644
+--- a/packages/plugin-mcp/src/mcp/tools/resource/delete.ts
++++ b/packages/plugin-mcp/src/mcp/tools/resource/delete.ts
+@@ -7,16 +7,21 @@ import type { MCPPluginConfig } from '../../../types.js'
+ 
+ import { toCamelCase } from '../../../utils/camelCase.js'
+ import {
++  bulkAnswer,
++  bulkPreflight,
+   currentDocument,
+   currentUpdatedAt,
+   errorResponse,
++  idsOf,
+   isLockedError,
++  isVersionMap,
+   lockConflict,
+   lockInfo,
+   readVersionCheck,
+   receipt,
+   staleConflict,
+   type ToolResponse,
++  type VersionMap,
+ } from '../../helpers/writeSafety.js'
+ import { toolSchemas } from '../schemas.js'
+ 
+@@ -41,17 +46,28 @@ export const deleteResourceTool = (
+     depth: number
+     fallbackLocale?: string
+     id?: number | string
+-    ifUpdatedAt?: string
++    ifUpdatedAt?: string | VersionMap
+     locale?: string
+     overrideLock: boolean
+     returnDocument: boolean
+     where?: string
+   }): Promise<ToolResponse> => {
+     const payload = req.payload
+-    const { id, where } = o
++    const { id } = o
++    const versions = isVersionMap(o.ifUpdatedAt) ? o.ifUpdatedAt : undefined
++    // C-bulk-versions (v2): a version map alone selects the documents it names.
++    const where = o.where ?? (id === undefined && versions && Object.keys(versions).length ? JSON.stringify({ id: { in: idsOf(versions) } }) : undefined)
+     if (id === undefined && !where) {
+       return out(errorResponse('Error: Either id or where clause must be provided'))
+     }
++    if (id === undefined && typeof o.ifUpdatedAt === 'string') {
++      return out(
++        errorResponse(
++          'Error: ifUpdatedAt as a single value pins one document (use it with id). For a bulk call pass a map {"<id>": "<updatedAt>"}, or leave it out: each document is checked against the version you last read. Nothing was deleted.',
++        ),
++      )
++    }
++    const pin = typeof o.ifUpdatedAt === 'string' ? o.ifUpdatedAt : id !== undefined ? versions?.[String(id)] : undefined
+     const deleteOptions: Record<string, unknown> = {
+       collection: collectionSlug,
+       depth: o.depth,
+@@ -84,10 +100,10 @@ export const deleteResourceTool = (
+ 
+     try {
+       if (id !== undefined) {
+-        if (o.ifUpdatedAt) {
++        if (pin) {
+           const current = await currentUpdatedAt({ collectionSlug, id, req, user })
+-          if (current !== o.ifUpdatedAt) {
+-            return out(staleConflict({ action: 'delete', collectionSlug, current, currentDoc: await currentDocument({ collectionSlug, id, req, user }), id, readTool, sent: o.ifUpdatedAt }))
++          if (current !== pin) {
++            return out(staleConflict({ action: 'delete', collectionSlug, current, currentDoc: await currentDocument({ collectionSlug, id, req, user }), id, readTool, sent: pin }))
+           }
+         } else {
+           const stale = await readVersionCheck({ collectionSlug, id, req, user })
+@@ -111,24 +127,29 @@ export const deleteResourceTool = (
+         }
+         return out(receipt({ action: 'deleted', collectionSlug, doc: result }), result)
+       }
+-      const result = (await payload.delete(deleteOptions as never)) as {
+-        docs?: Record<string, unknown>[]
+-        errors?: { id?: unknown; message?: string }[]
++      // Bulk (v2): every matching document is checked against its pinned or last-read version first; the stale ones
++      // are refused with their current state, the rest are deleted (best-effort, per document).
++      const whereClause = deleteOptions.where as Record<string, unknown>
++      const pre = await bulkPreflight({ collectionSlug, req, user, versions, where: whereClause })
++      let docs: Record<string, unknown>[] = []
++      let errors: { id?: unknown; message?: string }[] = []
++      if (pre.allowed.length) {
++        const result = (await payload.delete({
++          ...deleteOptions,
++          where: { and: [whereClause, { id: { in: pre.allowed } }] },
++        } as never)) as { docs?: Record<string, unknown>[]; errors?: { id?: unknown; message?: string }[] }
++        docs = result.docs || []
++        errors = result.errors || []
++        const seen = new Set([...docs.map((d) => String(d.id)), ...errors.map((e) => String(e.id))])
++        for (const a of pre.allowed) {
++          if (!seen.has(String(a))) {
++            errors.push({ id: a, message: 'no longer matched the where clause when it was deleted; not deleted' })
++          }
++        }
+       }
+-      const docs = result.docs || []
+-      const errors = result.errors || []
+-      const items = [
+-        ...docs.map((d) => ({ id: d.id, ok: true })),
+-        ...errors.map((e) => ({ id: e.id, error: e.message, ok: false })),
+-      ]
+-      const head =
+-        errors.length === 0
+-          ? `Deleted ${docs.length} document(s) from "${collectionSlug}".`
+-          : `PARTIAL: deleted ${docs.length} document(s) from "${collectionSlug}"; ${errors.length} could NOT be deleted (the others are gone).`
+-      const body = o.returnDocument ? `\n\`\`\`json\n${JSON.stringify({ docs, errors })}\n\`\`\`` : `\n${JSON.stringify({ results: items })}`
+       return out(
+-        { content: [{ type: 'text', text: head + body }], ...(errors.length ? { isError: true } : {}) },
+-        { docs, errors },
++        bulkAnswer({ action: 'deleted', applied: docs, collectionSlug, errors, readTool, refused: pre.refused, returnDocument: o.returnDocument, unmatchedPins: pre.unmatchedPins }),
++        { docs, errors, refused: pre.refused },
+       )
+     } catch (error) {
+       if (id !== undefined && isLockedError(error)) {
+@@ -146,9 +167,11 @@ export const deleteResourceTool = (
+       ...toolSchemas.deleteResource.parameters.shape,
+       all: z.boolean().optional().default(false).describe('Required to delete every document with an empty where clause'),
+       ifUpdatedAt: z
+-        .string()
++        .union([z.string(), z.record(z.string(), z.string())])
+         .optional()
+-        .describe('Optional: the updatedAt you read; if the document changed since, nothing is deleted'),
++        .describe(
++          'Optional pin; without it each document is checked against the version you last read. With id: the updatedAt string. With where: a map {"<id>": "<updatedAt>"}. A changed document is not deleted',
++        ),
+       overrideLock: z
+         .boolean()
+         .optional()
+@@ -171,7 +194,7 @@ export const deleteResourceTool = (
+           depth: (p.depth as number) ?? 0,
+           fallbackLocale: p.fallbackLocale as string | undefined,
+           id: p.id as number | string | undefined,
+-          ifUpdatedAt: p.ifUpdatedAt as string | undefined,
++          ifUpdatedAt: p.ifUpdatedAt as string | undefined | VersionMap,
+           locale: p.locale as string | undefined,
+           overrideLock: Boolean(p.overrideLock),
+           returnDocument: Boolean(p.returnDocument),
+diff --git a/packages/plugin-mcp/src/mcp/tools/resource/update.ts b/packages/plugin-mcp/src/mcp/tools/resource/update.ts
+index 1696112..e49065f 100644
+--- a/packages/plugin-mcp/src/mcp/tools/resource/update.ts
++++ b/packages/plugin-mcp/src/mcp/tools/resource/update.ts
+@@ -14,10 +14,14 @@ import {
+ import { convertCollectionSchemaToZod } from '../../../utils/schemaConversion/convertCollectionSchemaToZod.js'
+ import { transformPointDataToPayload } from '../../../utils/transformPointDataToPayload.js'
+ import {
++  bulkAnswer,
++  bulkPreflight,
+   currentDocument,
+   currentUpdatedAt,
+   errorResponse,
++  idsOf,
+   isLockedError,
++  isVersionMap,
+   lockConflict,
+   lockInfo,
+   OPERATION_ARGS,
+@@ -26,6 +30,7 @@ import {
+   rememberRead,
+   staleConflict,
+   type ToolResponse,
++  type VersionMap,
+ } from '../../helpers/writeSafety.js'
+ import { toolSchemas } from '../schemas.js'
+ 
+@@ -53,7 +58,7 @@ export const updateResourceTool = (
+     draft: boolean
+     fallbackLocale?: string
+     id?: number | string
+-    ifUpdatedAt?: string
++    ifUpdatedAt?: string | VersionMap
+     locale?: string
+     overrideLock: boolean
+     returnDocument: boolean
+@@ -61,7 +66,11 @@ export const updateResourceTool = (
+     where?: string
+   }): Promise<ToolResponse> => {
+     const payload = req.payload
+-    const { id, where } = o
++    const { id } = o
++    const versions = isVersionMap(o.ifUpdatedAt) ? o.ifUpdatedAt : undefined
++    // C-bulk-versions (v2): a version map alone selects the documents it names.
++    const where = o.where ?? (id === undefined && versions && Object.keys(versions).length ? JSON.stringify({ id: { in: idsOf(versions) } }) : undefined)
++    const pin = typeof o.ifUpdatedAt === 'string' ? o.ifUpdatedAt : id !== undefined ? versions?.[String(id)] : undefined
+     let parsedData = transformPointDataToPayload(o.data)
+     parsedData = stripVirtualFields(parsedData, getCollectionVirtualFieldNames(payload.config, collectionSlug))
+     const written = Object.keys(parsedData)
+@@ -72,6 +81,13 @@ export const updateResourceTool = (
+     if (id === undefined && !where) {
+       return out(errorResponse('Error: Either id or where clause must be provided'))
+     }
++    if (id === undefined && typeof o.ifUpdatedAt === 'string') {
++      return out(
++        errorResponse(
++          'Error: ifUpdatedAt as a single value pins one document (use it with id). For a bulk call pass a map {"<id>": "<updatedAt>"}, or leave it out: each document is checked against the version you last read. Nothing was changed.',
++        ),
++      )
++    }
+ 
+     let whereClause: Record<string, unknown> = {}
+     if (id === undefined && where) {
+@@ -96,10 +112,10 @@ export const updateResourceTool = (
+     try {
+       if (id !== undefined) {
+         // C-conflict: optional precondition on the version the agent read.
+-        if (o.ifUpdatedAt) {
++        if (pin) {
+           const current = await currentUpdatedAt({ collectionSlug, id, req, user })
+-          if (current !== o.ifUpdatedAt) {
+-            return out(staleConflict({ action: 'update', collectionSlug, current, currentDoc: await currentDocument({ collectionSlug, id, req, user }), id, readTool, sent: o.ifUpdatedAt }))
++          if (current !== pin) {
++            return out(staleConflict({ action: 'update', collectionSlug, current, currentDoc: await currentDocument({ collectionSlug, id, req, user }), id, readTool, sent: pin }))
+           }
+         } else {
+           // C-readversion: no explicit precondition: the version this user last read is the precondition.
+@@ -140,36 +156,40 @@ export const updateResourceTool = (
+         return out(receipt({ action: 'updated', collectionSlug, doc, written }), result)
+       }
+ 
+-      // Bulk: per-document results; isError when any document failed (C-bulk).
+-      const result = (await payload.update({
+-        collection: collectionSlug,
+-        data: parsedData,
+-        depth: o.depth,
+-        draft: o.draft,
+-        overrideAccess: false,
+-        overrideLock: o.overrideLock,
+-        req,
+-        user,
+-        where: whereClause,
+-        ...(o.locale && { locale: o.locale }),
+-        ...(o.fallbackLocale && { fallbackLocale: o.fallbackLocale }),
+-        ...(o.select && { select: o.select as SelectType }),
+-      } as never)) as { docs?: Record<string, unknown>[]; errors?: { id?: unknown; message?: string }[] }
+-      const docs = result.docs || []
+-      const errors = result.errors || []
++      // Bulk (v2): per-document preconditions (pinned in the ifUpdatedAt map, else the version this user last read);
++      // stale documents are refused with their current state, the rest are updated; per-document results, isError
++      // when any document was not changed (C-bulk, best-effort).
++      const pre = await bulkPreflight({ collectionSlug, req, user, versions, where: whereClause })
++      let docs: Record<string, unknown>[] = []
++      let errors: { id?: unknown; message?: string }[] = []
++      if (pre.allowed.length) {
++        const result = (await payload.update({
++          collection: collectionSlug,
++          data: parsedData,
++          depth: o.depth,
++          draft: o.draft,
++          overrideAccess: false,
++          overrideLock: o.overrideLock,
++          req,
++          user,
++          where: { and: [whereClause, { id: { in: pre.allowed } }] },
++          ...(o.locale && { locale: o.locale }),
++          ...(o.fallbackLocale && { fallbackLocale: o.fallbackLocale }),
++          ...(o.select && { select: o.select as SelectType }),
++        } as never)) as { docs?: Record<string, unknown>[]; errors?: { id?: unknown; message?: string }[] }
++        docs = result.docs || []
++        errors = result.errors || []
++        const seen = new Set([...docs.map((d) => String(d.id)), ...errors.map((e) => String(e.id))])
++        for (const a of pre.allowed) {
++          if (!seen.has(String(a))) {
++            errors.push({ id: a, message: 'no longer matched the where clause when it was written; not changed' })
++          }
++        }
++      }
+       rememberRead(user, collectionSlug, docs)
+-      const items = [
+-        ...docs.map((d) => ({ id: d.id, ok: true, updatedAt: d.updatedAt })),
+-        ...errors.map((e) => ({ id: e.id, error: e.message, ok: false })),
+-      ]
+-      const head =
+-        errors.length === 0
+-          ? `Updated ${docs.length} document(s) in "${collectionSlug}".`
+-          : `PARTIAL: updated ${docs.length} document(s) in "${collectionSlug}"; ${errors.length} failed and were NOT changed (the others stay changed).`
+-      const body = o.returnDocument ? `\n\`\`\`json\n${JSON.stringify({ docs, errors })}\n\`\`\`` : `\n${JSON.stringify({ results: items })}`
+       return out(
+-        { content: [{ type: 'text', text: head + body }], ...(errors.length ? { isError: true } : {}) },
+-        { docs, errors },
++        bulkAnswer({ action: 'updated', applied: docs, collectionSlug, errors, readTool, refused: pre.refused, returnDocument: o.returnDocument, unmatchedPins: pre.unmatchedPins }),
++        { docs, errors, refused: pre.refused },
+       )
+     } catch (error) {
+       if (id !== undefined && isLockedError(error)) {
+@@ -213,10 +233,10 @@ export const updateResourceTool = (
+         .describe('Optional: fallback locale code to use when requested locale is not available'),
+       id: z.union([z.string(), z.number()]).optional().describe('The ID of the document to update'),
+       ifUpdatedAt: z
+-        .string()
++        .union([z.string(), z.record(z.string(), z.string())])
+         .optional()
+         .describe(
+-          'Recommended for edits based on an earlier read: the updatedAt you read. If the document changed since, nothing is written and you get the current updatedAt',
++          'Optional pin; without it each document is checked against the version you last read. With id: the updatedAt string. With where: a map {"<id>": "<updatedAt>"}. A changed document is not written; you get its current version',
+         ),
+       locale: z
+         .string()
+@@ -238,7 +258,7 @@ export const updateResourceTool = (
+         .record(z.string(), z.unknown())
+         .optional()
+         .describe("Optional: define exactly which fields you'd like to return in the response, e.g., {\"title\": true}"),
+-      where: z.string().optional().describe('JSON string for where clause to update multiple documents'),
++      where: z.string().optional().describe('JSON string for where clause to update multiple documents in one call, e.g. {"id":{"in":[1,2]}}'),
+     })
+ 
+     server.registerTool(
+@@ -271,7 +291,7 @@ export const updateResourceTool = (
+           draft: Boolean(draft),
+           fallbackLocale: fallbackLocale as string | undefined,
+           id: id as number | string | undefined,
+-          ifUpdatedAt: ifUpdatedAt as string | undefined,
++          ifUpdatedAt: ifUpdatedAt as string | undefined | VersionMap,
+           locale: locale as string | undefined,
+           overrideLock: Boolean(overrideLock),
+           returnDocument: Boolean(returnDocument),
+-- 
+2.50.1 (Apple Git-155)
+

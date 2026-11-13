@@ -1,0 +1,50 @@
+format: isokron/probe-experiment@1
+id: E9-bulk-delete-stale
+run_id: e9-v2
+title: bulk delete by where with one document changed after the read (research v2 batching fix)
+hypothesis: >-
+  After findTasks reads Mara's five tasks (ids 1, 5, 9, 13, 17) and another writer then changes task 9 through REST,
+  one deleteTasks with where owner = Mara deletes task 9 as well: the change made after the read is lost with no
+  signal (a lost update reopened by batching). Research v1 has no read-version check in bulk calls; research v2
+  checks every matching document against the version this user last read.
+arms:
+  - name: test
+    role: test
+    description: MCP findTasks (owner Mara), REST PATCH of task 9 (another writer), MCP deleteTasks where owner Mara (one call)
+    reps: 5
+    reset: [task]
+    steps:
+      - { id: r, kind: call, tool: findTasks, args: { where: '{"owner":{"equals":"Mara"}}', limit: 50 } }
+      - { id: b, kind: http, method: PATCH, path: /api/tasks/9, body: { priority: 4 }, content_type: application/json }
+      - { id: w, kind: call, tool: deleteTasks, args: { where: '{"owner":{"equals":"Mara"}}' } }
+      - { id: s, kind: read, object: stale9 }
+      - { id: o, kind: read, object: mara5 }
+      - { id: after, kind: read, object: { path: '/api/tasks?where[owner][equals]=Mara&limit=0&depth=0' } }
+    counters:
+      stale_deleted: { not: s.obj.exists }
+      stale_kept: s.obj.exists
+      others_deleted: 'after.obj.totalDocs == 1'
+      other_deleted: { not: o.obj.exists }
+      flagged_error: 'w.isError'
+      names_stale: "w.text contains 'stale'"
+    columns: { left: after.obj.totalDocs, isError: w.isError, head: w.text }
+  - name: control
+    role: control
+    description: the same read and bulk delete with no other writer (batching must still delete all five)
+    reps: 5
+    reset: [task]
+    steps:
+      - { id: r, kind: call, tool: findTasks, args: { where: '{"owner":{"equals":"Mara"}}', limit: 50 } }
+      - { id: w, kind: call, tool: deleteTasks, args: { where: '{"owner":{"equals":"Mara"}}' } }
+      - { id: after, kind: read, object: { path: '/api/tasks?where[owner][equals]=Mara&limit=0&depth=0' } }
+    counters:
+      all_deleted: 'after.obj.totalDocs == 0'
+      flagged_error: 'w.isError'
+    columns: { left: after.obj.totalDocs, isError: w.isError }
+verdict:
+  criterion: >-
+    reproduced (lost update) if the bulk delete removed the changed task 9 in every valid repetition (at least 3);
+    not reproduced if it never removed task 9, deleted the other four, flagged isError and said "stale" every time,
+    while the control deleted all five without isError every time; otherwise inconclusive.
+  reproduced: { all: ['test.valid >= 3', 'test.stale_deleted == test.valid'] }
+  not_reproduced: { all: ['test.valid >= 3', 'test.stale_kept == test.valid', 'test.others_deleted == test.valid', 'test.other_deleted == test.valid', 'test.flagged_error == test.valid', 'test.names_stale == test.valid', 'control.valid >= 3', 'control.all_deleted == control.valid', 'control.flagged_error == 0'] }

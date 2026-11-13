@@ -1,0 +1,3 @@
+{ "build": "research", "base": "@payloadcms/plugin-mcp 3.93.0 (npm) / v3.93.0 77425c50", "source_commit": "377213e190a896fc73b523bc2b505600fe2421d3",
+  "dirty_source": false,
+  "files": 7, "esbuild": "0.25.12", "built_at": "2026-11-13T06:39:07Z" }

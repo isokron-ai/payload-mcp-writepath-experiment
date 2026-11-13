@@ -1,0 +1,43 @@
+From 81d51a4b922823fd3ecde4d77bdceeabe79f0e97 Mon Sep 17 00:00:00 2001
+From: Joshua Bryan <45343084+rafe-walker@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 23:39:07 -0700
+Subject: [PATCH 5/7] fix(plugin-mcp): data argument only for colliding field
+ names (catalog weight)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../src/mcp/tools/resource/update.ts           | 18 +++++++++---------
+ 1 file changed, 9 insertions(+), 9 deletions(-)
+
+diff --git a/packages/plugin-mcp/src/mcp/tools/resource/update.ts b/packages/plugin-mcp/src/mcp/tools/resource/update.ts
+index 8a5def4..1696112 100644
+--- a/packages/plugin-mcp/src/mcp/tools/resource/update.ts
++++ b/packages/plugin-mcp/src/mcp/tools/resource/update.ts
+@@ -196,15 +196,15 @@ export const updateResourceTool = (
+         .optional()
+         .default(false)
+         .describe('Required to update every document with an empty where clause'),
+-      data: z
+-        .object(fieldShape)
+-        .partial()
+-        .optional()
+-        .describe(
+-          colliding.length
+-            ? `Document fields to write. Fields named ${colliding.join(', ')} can only be written here (the top-level names are operation arguments).`
+-            : 'Document fields to write (alternative to passing them at the top level)',
+-        ),
++      ...(colliding.length
++        ? {
++            data: z
++              .object(Object.fromEntries(colliding.map((k) => [k, fieldShape[k]!])))
++              .partial()
++              .optional()
++              .describe(`Document fields named ${colliding.join(', ')}: write them here (the top-level names are operation arguments).`),
++          }
++        : {}),
+       depth: z.number().int().min(0).max(10).optional().default(0).describe('How many levels deep to populate relationships'),
+       draft: z.boolean().optional().default(false).describe('Whether to update the document as a draft'),
+       fallbackLocale: z
+-- 
+2.50.1 (Apple Git-155)
+

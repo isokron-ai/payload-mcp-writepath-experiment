@@ -1,0 +1,11 @@
+format: isokron/probe-target@1
+adapter: ../payload-adapter.mjs
+server:
+  command: node
+  args: [../../lib/stdio-bridge.mjs]
+options:
+  api_url: http://127.0.0.1:3094
+  seed_expected: ../seed-expected-locked.json
+  hold_locks: [{ collection: posts, id: 2, as: editor-b }]
+  objects:
+    post: { collection: posts, id: 2 }

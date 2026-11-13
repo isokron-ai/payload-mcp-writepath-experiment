@@ -1,0 +1,15 @@
+payload-mcp-writepath-experiment
+
+Based on payloadcms/payload (https://github.com/payloadcms/payload), tag v3.93.0, commit
+77425c50f7f2074e728d13c577eb37c246f1e0c5: the directory packages/plugin-mcp and the root LICENSE.md, imported
+unmodified (tag upstream-v3.93.0). Copyright (c) 2018-2025 Payload CMS, Inc., licensed under the MIT License (see
+LICENSE.md and packages/plugin-mcp/LICENSE.md). Upstream ships no NOTICE file.
+
+Modifications: the 7 experiment commits after tag upstream-v3.93.0 change files under packages/plugin-mcp/src;
+CHANGES-EXPERIMENT.md lists every changed file with its commit, and patches/ holds the same commits as a series.
+
+The experiment commits, the patch series, the build script and benchmark files in harness/, and the documentation and
+results are by IsoKron (Stormhaven Enterprises LLC), https://isokron.ai, released under the MIT License.
+
+Not affiliated with, sponsored by, or endorsed by Payload CMS, Inc. Not an official Payload release. "Payload" is used
+only to identify the upstream project.

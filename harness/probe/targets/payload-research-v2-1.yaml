@@ -1,0 +1,15 @@
+format: isokron/probe-target@1
+adapter: ../payload-adapter.mjs
+server:
+  command: node
+  args: [../../lib/stdio-bridge.mjs]
+options:
+  api_url: http://127.0.0.1:3096
+  seed_expected: ../seed-expected.json
+  objects:
+    post: { collection: posts, id: 2 }
+    post3: { collection: posts, id: 3 }
+    listing: { collection: listings, id: 4 }
+    task: { collection: tasks, id: 1 }
+    stale9: { collection: tasks, id: 9 }
+    mara5: { collection: tasks, id: 5 }

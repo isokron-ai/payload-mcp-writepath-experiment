@@ -1,0 +1,28 @@
+# Checks that the upstream import is unmodified, that the patch series reproduces every research build, and that each
+# build's transpiled files match the build that was measured (results/builds/). No secrets, no network beyond npm for
+# esbuild. Runs on main and on demand only, so pushes to working branches do not use Actions minutes.
+name: ci
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  reproduce:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Upstream import is payloadcms/payload v3.93.0, unmodified
+        run: harness/build/build.sh check-upstream
+      - name: Patch series reproduces research v1, v2 and v2.1
+        run: harness/build/build.sh check-patches
+      - name: Research builds transpile to the measured files
+        run: harness/build/build.sh transpile all "$RUNNER_TEMP/builds"

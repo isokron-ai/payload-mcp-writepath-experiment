@@ -1,0 +1,23 @@
+# Postgres for the isokron-payload-mcp-2026-11 sandbox. Loopback only (127.0.0.1:55493).
+# The password comes from ~/.payload-mcp-exp/app.env (outside the repo) via sandbox/up.sh.
+name: isokron-payload-mcp-2026-11
+services:
+  pg:
+    image: postgres:17.6-alpine@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94
+    container_name: isokron-payload-mcp-2026-11-pg
+    environment:
+      POSTGRES_USER: payload
+      POSTGRES_DB: payload
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set by sandbox/up.sh}
+    ports:
+      - "127.0.0.1:55493:5432"
+    volumes:
+      - isokron-payload-mcp-2026-11-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U payload -d payload"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+volumes:
+  isokron-payload-mcp-2026-11-pgdata:
+    name: isokron-payload-mcp-2026-11-pgdata

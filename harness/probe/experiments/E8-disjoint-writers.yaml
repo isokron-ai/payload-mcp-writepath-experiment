@@ -1,0 +1,42 @@
+format: isokron/probe-experiment@1
+id: E8-disjoint-writers
+run_id: e8-001
+title: two writers on different fields of one post, released together (positive control, parity expected)
+hypothesis: >-
+  An MCP updatePosts of the title and a REST PATCH of the summary of the same post, released together, both stick
+  (partial updates; no lost update on disjoint fields), as do two REST PATCHes.
+arms:
+  - name: test
+    role: test
+    description: MCP updatePosts (title) and REST PATCH (summary) on one post, released together
+    reps: 10
+    reset: [post3]
+    steps:
+      - id: race
+        kind: pair
+        mode: same
+        a: { tool: updatePosts, args: { id: 3, title: 'T{{REP}}' } }
+        b: { http: [PATCH, /api/posts/3], body: { summary: 'S{{REP}}' }, content_type: application/json }
+      - { id: final, kind: read, object: post3 }
+    counters:
+      both_kept: { all: ["final.obj.doc.title.en == 'T{{REP}}'", "final.obj.doc.summary.en == 'S{{REP}}'"] }
+      lost: { any: ["final.obj.doc.title.en != 'T{{REP}}'", "final.obj.doc.summary.en != 'S{{REP}}'"] }
+  - name: control
+    role: control
+    description: two REST PATCHes (title, summary) on one post, released together
+    reps: 10
+    reset: [post3]
+    steps:
+      - id: race
+        kind: pair
+        mode: same
+        a: { http: [PATCH, /api/posts/3], body: { title: 'T{{REP}}' }, content_type: application/json }
+        b: { http: [PATCH, /api/posts/3], body: { summary: 'S{{REP}}' }, content_type: application/json }
+      - { id: final, kind: read, object: post3 }
+    counters:
+      both_kept: { all: ["final.obj.doc.title.en == 'T{{REP}}'", "final.obj.doc.summary.en == 'S{{REP}}'"] }
+      lost: { any: ["final.obj.doc.title.en != 'T{{REP}}'", "final.obj.doc.summary.en != 'S{{REP}}'"] }
+verdict:
+  criterion: reproduced (a lost update on disjoint fields through MCP only) if any MCP pair lost a field while no REST pair did; not reproduced if every MCP pair kept both (parity, the expected outcome of this positive control); otherwise inconclusive.
+  reproduced: { all: ['test.lost >= 1', 'control.lost == 0'] }
+  not_reproduced: { all: ['test.valid >= 5', 'test.lost == 0'] }

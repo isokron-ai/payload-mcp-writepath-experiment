@@ -1,0 +1,78 @@
+# MCP static sweep: mcp-typescript server on vercel 0.1.0
+
+> **Model-visible** = what the model reads (`name`, `description`, `inputSchema`); **wire** = the whole tools/list entry (icons, `_meta` and `outputSchema` included), which clients do not pass to the model. Budgets apply to model-visible tokens. Every tool is counted once, as if the full catalog were loaded: not session or task exposure.
+> `cl100k`: tiktoken cl100k\_base (reference scale; not a Claude tokenizer).
+
+|  | value |
+| --- | --- |
+| source | file `payload-mcp-3.93.0-research.json` (snapshot), adapter `tools-list` |
+| protocol | 2025-11-25 (requested 2025-11-25) |
+| client capabilities | `{}` |
+| catalog fingerprint | `5aee96c761176d60de46ee8e82d62cd344428f130a74e4af2700b0f79d90aa66` |
+| tools-ordered fingerprint (ADR-0005) | n/a |
+| model-visible measured as | canonical JSON (RFC 8785) of the fields clients pass to the model: name, description, inputSchema |
+| wire measured as | canonical JSON (RFC 8785) of each whole tools/list entry, icons and \_meta included |
+| generator | `mcp-catalog-snap/0.3.0` · report `mcp-catalog-snap/sweep/1` |
+
+## Totals
+
+12 tools, 0 prompts, 0 resource templates.
+
+| measure | bytes | cl100k tokens |
+| --- | ---: | ---: |
+| **model-visible (all tools)** | 23,522 | 5,060 |
+| model-visible fields, each tokenized on its own (sum) | 23,006 | 4,964 |
+| wire (whole tools/list entries) | 25,256 | 5,468 |
+| field `name` | 138 | 28 |
+| field `description` | 660 | 135 |
+| field `inputSchema` | 22,208 | 4,801 |
+| field `annotations` | 1,074 | 300 |
+| field `other` | 492 | 108 |
+
+The whole-object figure tokenizes one JSON object per tool (keys, quotes and the description's JSON escaping count, and tokens merge across field boundaries); the field rows tokenize each field on its own (name and description as raw text). The two need not match; budgets use the whole-object figure.
+
+Per-tool model-visible (cl100k): median 420, p90 551, max 702.
+
+## Budget
+
+No budget set (advisory per-tool threshold: 5,000 cl100k model-visible tokens). Set `--max-tool-tokens` / `--max-catalog-tokens` to fail CI (exit 4). Budgets apply to model-visible tokens.
+
+## Findings
+
+| rule | what | findings | tools | error / warn / info |
+| --- | --- | ---: | ---: | ---: |
+| `untyped-node` | schema nodes that accept anything ({} / items: {} / opaque objects) | 9 | 9 | 0 / 0 / 9 |
+
+Enum / const-union sizes: 0-5: 6 · 6-10: 0 · 11-20: 0 · 21-50: 0 · 51-100: 0 · 101-500: 0 · 501+: 0
+
+## Largest tools (model-visible cl100k)
+
+| # | tool | model-visible cl100k tokens | model-visible bytes | wire bytes | dup % | largest enum | findings |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | `updatePosts` | 702 | 3,188 | 3,332 | 0 | 4 | 1 |
+| 2 | `createPosts` | 551 | 2,434 | 2,580 | 0 | 4 | 1 |
+| 3 | `updateListings` | 484 | 2,275 | 2,419 | 0 | 0 | 1 |
+| 4 | `findListings` | 475 | 2,199 | 2,343 | 0 | 0 | 1 |
+| 5 | `findPosts` | 474 | 2,196 | 2,340 | 0 | 0 | 1 |
+| 6 | `findTasks` | 474 | 2,196 | 2,340 | 0 | 0 | 1 |
+| 7 | `updateTasks` | 420 | 1,993 | 2,137 | 0 | 3 | 1 |
+| 8 | `createListings` | 333 | 1,519 | 1,665 | 0 | 0 | 1 |
+| 9 | `deleteListings` | 294 | 1,432 | 1,576 | 0 | 0 | 0 |
+| 10 | `deletePosts` | 293 | 1,429 | 1,573 | 0 | 0 | 0 |
+| 11 | `deleteTasks` | 293 | 1,429 | 1,573 | 0 | 0 | 0 |
+| 12 | `createTasks` | 267 | 1,232 | 1,378 | 0 | 3 | 1 |
+
+## Examples
+
+### `untyped-node`
+
+- **info** `createListings` `/inputSchema`: 2 untyped node(s): 1 with no type, 0 items: {}, 1 opaque object(s)
+- **info** `createPosts` `/inputSchema`: 2 untyped node(s): 1 with no type, 0 items: {}, 1 opaque object(s)
+- **info** `createTasks` `/inputSchema`: 2 untyped node(s): 1 with no type, 0 items: {}, 1 opaque object(s)
+- **info** `findListings` `/inputSchema`: 6 untyped node(s): 3 with no type, 0 items: {}, 3 opaque object(s)
+- **info** `findPosts` `/inputSchema`: 6 untyped node(s): 3 with no type, 0 items: {}, 3 opaque object(s)
+- … 4 more in the JSON report
+
+## Notes
+
+- input is a snapshot: tools are stored sorted, so the server-order (ADR-0005) fingerprint is unavailable

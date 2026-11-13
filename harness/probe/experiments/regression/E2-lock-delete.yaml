@@ -1,0 +1,41 @@
+format: isokron/probe-experiment@1
+id: E2-lock-delete-research
+run_id: re2-001
+candidate: F2
+title: deletePosts by id while another user holds the document lock
+hypothesis: >-
+  deletePosts {id} while editor-b holds a fresh lock on the post deletes it and answers with its success text; REST
+  DELETE by the same user under the same lock is refused with HTTP 423.
+arms:
+  - name: test
+    role: test
+    description: MCP deletePosts by id (the tool has no overrideLock argument)
+    reps: 10
+    reset: [post]
+    steps:
+      - { id: before, kind: read, object: post, require: 'before.obj.lock_count == 1' }
+      - { id: w, kind: call, tool: deletePosts, args: { id: 2 } }
+      - { id: after, kind: read, object: post }
+    counters:
+      deleted: { not: after.obj.exists }
+      said_success: "w.text contains 'deleted successfully'"
+      flagged_error: 'w.isError'
+    columns: { exists_after: after.obj.exists, head: w.text }
+  - name: control
+    role: control
+    description: REST DELETE /api/posts/2 as editor-a under editor-b's lock
+    reps: 10
+    reset: [post]
+    steps:
+      - { id: before, kind: read, object: post, require: 'before.obj.lock_count == 1' }
+      - { id: w, kind: http, method: DELETE, path: /api/posts/2 }
+      - { id: after, kind: read, object: post }
+    counters:
+      deleted: { not: after.obj.exists }
+      refused_423: 'w.status == 423'
+verdict:
+  criterion: >-
+    reproduced if the MCP delete removed the locked post in every valid repetition (at least 5) while REST refused
+    every time with 423 and kept it; not reproduced if the MCP delete never removed it; otherwise inconclusive.
+  reproduced: { all: ['test.valid >= 5', 'test.deleted == test.valid', 'control.valid >= 5', 'control.refused_423 == control.valid', 'control.deleted == 0'] }
+  not_reproduced: { all: ['test.valid >= 5', 'test.deleted == 0'] }

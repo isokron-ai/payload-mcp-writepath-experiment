@@ -1,0 +1,160 @@
+From 98db1c6adce8eb9a479309c0242cd7be2d467732 Mon Sep 17 00:00:00 2001
+From: Joshua Bryan <45343084+rafe-walker@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 23:37:56 -0700
+Subject: [PATCH 4/7] feat(plugin-mcp): conflict answers carry the current
+ document
+
+So a retry can be informed by the conflict reply itself, without another read.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../plugin-mcp/src/mcp/helpers/writeSafety.ts | 33 ++++++++++++++++---
+ .../src/mcp/tools/resource/delete.ts          |  7 ++--
+ .../src/mcp/tools/resource/update.ts          |  7 ++--
+ 3 files changed, 36 insertions(+), 11 deletions(-)
+
+diff --git a/packages/plugin-mcp/src/mcp/helpers/writeSafety.ts b/packages/plugin-mcp/src/mcp/helpers/writeSafety.ts
+index 5a08d52..a0b6c6e 100644
+--- a/packages/plugin-mcp/src/mcp/helpers/writeSafety.ts
++++ b/packages/plugin-mcp/src/mcp/helpers/writeSafety.ts
+@@ -81,19 +81,41 @@ export async function currentUpdatedAt(args: {
+   }
+ }
+ 
++/** The document as it is now (depth 0, latest draft), carried in conflict answers so a retry can be informed. */
++export async function currentDocument(args: {
++  collectionSlug: string
++  id: number | string
++  req: PayloadRequest
++  user: TypedUser
++}): Promise<null | Record<string, unknown>> {
++  try {
++    return (await args.req.payload.findByID({
++      id: args.id,
++      collection: args.collectionSlug,
++      depth: 0,
++      draft: true,
++      overrideAccess: false,
++      user: args.user,
++    })) as unknown as Record<string, unknown>
++  } catch {
++    return null
++  }
++}
++
+ export function lockConflict(args: {
+   action: 'delete' | 'update'
+   collectionSlug: string
++  current?: null | Record<string, unknown>
+   id: number | string
+   info: { documentUpdatedAt: null | string; lockedBy: null | string; lockedSince: null | string }
+   readTool: string
+ }): ToolResponse {
+   const { action, collectionSlug, id, info, readTool } = args
+   const who = info.lockedBy ?? 'another user'
+-  const structured = { conflict: 'locked', collection: collectionSlug, id, ...info, applied: false }
++  const structured = { conflict: 'locked', collection: collectionSlug, id, ...info, applied: false, currentDocument: args.current ?? null }
+   return errorResponse(
+     `Conflict: ${collectionSlug} ${id} is open for editing by ${who}${info.lockedSince ? ` (lock refreshed ${info.lockedSince})` : ''}. ` +
+-      `Your ${action} was NOT applied. They may save their own changes, so re-read the document with ${readTool} ` +
++      `Your ${action} was NOT applied. The current document is below (currentDocument); they may save more changes, so re-read it with ${readTool} ` +
+       `before trying again, then re-apply only your change to the current version (pass ifUpdatedAt with the updatedAt you read). ` +
+       `If it is still locked, tell the user who is editing it. Pass overrideLock: true only if the user explicitly asked you to take over their editing session.\n` +
+       JSON.stringify(structured),
+@@ -104,16 +126,17 @@ export function staleConflict(args: {
+   action: 'delete' | 'update'
+   collectionSlug: string
+   current: null | string
++  currentDoc?: null | Record<string, unknown>
+   id: number | string
+   readTool: string
+   sent: string
+ }): ToolResponse {
+   const { action, collectionSlug, current, id, readTool, sent } = args
+-  const structured = { conflict: 'stale', collection: collectionSlug, id, ifUpdatedAt: sent, documentUpdatedAt: current, applied: false }
++  const structured = { conflict: 'stale', collection: collectionSlug, id, ifUpdatedAt: sent, documentUpdatedAt: current, applied: false, currentDocument: args.currentDoc ?? null }
+   return errorResponse(
+     `Conflict: ${collectionSlug} ${id} changed since you read it (you sent ifUpdatedAt ${sent}; it is now ${current ?? 'gone'}). ` +
+-      `Your ${action} was NOT applied. Re-read it with ${readTool}, re-apply only your own change to the current version, ` +
+-      `and retry with ifUpdatedAt ${current ?? '<the new updatedAt>'}.\n` +
++      `Your ${action} was NOT applied. The current document is below (currentDocument): re-apply only your own change to it ` +
++      `(or re-read it with ${readTool}) and retry with ifUpdatedAt ${current ?? '<the new updatedAt>'}.\n` +
+       JSON.stringify(structured),
+   )
+ }
+diff --git a/packages/plugin-mcp/src/mcp/tools/resource/delete.ts b/packages/plugin-mcp/src/mcp/tools/resource/delete.ts
+index 5d430d2..47d2779 100644
+--- a/packages/plugin-mcp/src/mcp/tools/resource/delete.ts
++++ b/packages/plugin-mcp/src/mcp/tools/resource/delete.ts
+@@ -7,6 +7,7 @@ import type { MCPPluginConfig } from '../../../types.js'
+ 
+ import { toCamelCase } from '../../../utils/camelCase.js'
+ import {
++  currentDocument,
+   currentUpdatedAt,
+   errorResponse,
+   isLockedError,
+@@ -86,12 +87,12 @@ export const deleteResourceTool = (
+         if (o.ifUpdatedAt) {
+           const current = await currentUpdatedAt({ collectionSlug, id, req, user })
+           if (current !== o.ifUpdatedAt) {
+-            return out(staleConflict({ action: 'delete', collectionSlug, current, id, readTool, sent: o.ifUpdatedAt }))
++            return out(staleConflict({ action: 'delete', collectionSlug, current, currentDoc: await currentDocument({ collectionSlug, id, req, user }), id, readTool, sent: o.ifUpdatedAt }))
+           }
+         } else {
+           const stale = await readVersionCheck({ collectionSlug, id, req, user })
+           if (stale) {
+-            return out(staleConflict({ action: 'delete', collectionSlug, current: stale.current, id, readTool, sent: stale.seen }))
++            return out(staleConflict({ action: 'delete', collectionSlug, current: stale.current, currentDoc: await currentDocument({ collectionSlug, id, req, user }), id, readTool, sent: stale.seen }))
+           }
+         }
+         const result = (await payload.delete(deleteOptions as never)) as unknown as Record<string, unknown>
+@@ -132,7 +133,7 @@ export const deleteResourceTool = (
+     } catch (error) {
+       if (id !== undefined && isLockedError(error)) {
+         const info = await lockInfo({ collectionSlug, id, req, user })
+-        return out(lockConflict({ action: 'delete', collectionSlug, id, info, readTool }))
++        return out(lockConflict({ action: 'delete', collectionSlug, current: await currentDocument({ collectionSlug, id, req, user }), id, info, readTool }))
+       }
+       const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+       payload.logger.error(`[payload-mcp] Error deleting resource from ${collectionSlug}: ${errorMessage}`)
+diff --git a/packages/plugin-mcp/src/mcp/tools/resource/update.ts b/packages/plugin-mcp/src/mcp/tools/resource/update.ts
+index 6cc7650..8a5def4 100644
+--- a/packages/plugin-mcp/src/mcp/tools/resource/update.ts
++++ b/packages/plugin-mcp/src/mcp/tools/resource/update.ts
+@@ -14,6 +14,7 @@ import {
+ import { convertCollectionSchemaToZod } from '../../../utils/schemaConversion/convertCollectionSchemaToZod.js'
+ import { transformPointDataToPayload } from '../../../utils/transformPointDataToPayload.js'
+ import {
++  currentDocument,
+   currentUpdatedAt,
+   errorResponse,
+   isLockedError,
+@@ -98,13 +99,13 @@ export const updateResourceTool = (
+         if (o.ifUpdatedAt) {
+           const current = await currentUpdatedAt({ collectionSlug, id, req, user })
+           if (current !== o.ifUpdatedAt) {
+-            return out(staleConflict({ action: 'update', collectionSlug, current, id, readTool, sent: o.ifUpdatedAt }))
++            return out(staleConflict({ action: 'update', collectionSlug, current, currentDoc: await currentDocument({ collectionSlug, id, req, user }), id, readTool, sent: o.ifUpdatedAt }))
+           }
+         } else {
+           // C-readversion: no explicit precondition: the version this user last read is the precondition.
+           const stale = await readVersionCheck({ collectionSlug, id, req, user })
+           if (stale) {
+-            return out(staleConflict({ action: 'update', collectionSlug, current: stale.current, id, readTool, sent: stale.seen }))
++            return out(staleConflict({ action: 'update', collectionSlug, current: stale.current, currentDoc: await currentDocument({ collectionSlug, id, req, user }), id, readTool, sent: stale.seen }))
+           }
+         }
+         const result = await payload.update({
+@@ -173,7 +174,7 @@ export const updateResourceTool = (
+     } catch (error) {
+       if (id !== undefined && isLockedError(error)) {
+         const info = await lockInfo({ collectionSlug, id, req, user })
+-        return out(lockConflict({ action: 'update', collectionSlug, id, info, readTool }))
++        return out(lockConflict({ action: 'update', collectionSlug, current: await currentDocument({ collectionSlug, id, req, user }), id, info, readTool }))
+       }
+       const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+       payload.logger.error(`[payload-mcp] Error updating resource in ${collectionSlug}: ${errorMessage}`)
+-- 
+2.50.1 (Apple Git-155)
+

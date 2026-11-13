@@ -1,0 +1,41 @@
+format: isokron/probe-experiment@1
+id: E5-field-names
+run_id: e5-001
+candidate: F4
+title: collection fields named locale, draft and select
+hypothesis: >-
+  updateListings {id, locale:"de-DE"} and {id, draft:true} answer success and leave the stored locale and draft
+  fields unchanged, and createListings {name, sku, price, locale:"fr-FR", draft:true} stores no locale; REST stores
+  all of them.
+arms:
+  - name: test
+    role: test
+    description: MCP updateListings/createListings with locale and draft
+    reps: 5
+    reset: [listing]
+    steps:
+      - { id: w1, kind: call, tool: updateListings, args: { id: 4, locale: 'de-DE' } }
+      - { id: w2, kind: call, tool: updateListings, args: { id: 4, draft: true } }
+      - { id: after, kind: read, object: listing }
+      - { id: c, kind: call, tool: createListings, args: { name: 'Kneeler', sku: 'TOOL-KNL-{{REP}}', price: 12, locale: 'fr-FR', draft: true } }
+      - { id: created, kind: read, object: { path: '/api/listings?where[sku][equals]=TOOL-KNL-{{REP}}&depth=0' } }
+    counters:
+      locale_lost: "after.obj.doc.locale == 'en-GB'"
+      draft_lost: 'after.obj.doc.draft == false'
+      create_locale_lost: 'created.obj.docs[0].locale == null'
+      said_success: { all: ["w1.text contains 'updated successfully'", "w2.text contains 'updated successfully'"] }
+    columns: { locale: after.obj.doc.locale, draft: after.obj.doc.draft, created_locale: 'created.obj.docs[0].locale' }
+  - name: control
+    role: control
+    description: REST PATCH of the same fields
+    reps: 5
+    reset: [listing]
+    steps:
+      - { id: w, kind: http, method: PATCH, path: /api/listings/4, body: { locale: 'de-DE', draft: true, select: 'category-top-2' }, content_type: application/json }
+      - { id: after, kind: read, object: listing }
+    counters:
+      stored: { all: ["after.obj.doc.locale == 'de-DE'", 'after.obj.doc.draft == true', "after.obj.doc.select == 'category-top-2'"] }
+verdict:
+  criterion: reproduced if every valid MCP repetition answered success yet left locale and draft unchanged and created the listing with no locale, while REST stored all three every time; not reproduced if the MCP writes stored locale or draft every time; otherwise inconclusive.
+  reproduced: { all: ['test.valid >= 3', 'test.locale_lost == test.valid', 'test.draft_lost == test.valid', 'test.create_locale_lost == test.valid', 'test.said_success == test.valid', 'control.valid >= 3', 'control.stored == control.valid'] }
+  not_reproduced: { all: ['test.valid >= 3', 'test.locale_lost == 0', 'test.draft_lost == 0'] }

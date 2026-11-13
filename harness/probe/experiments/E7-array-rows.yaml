@@ -1,0 +1,37 @@
+format: isokron/probe-experiment@1
+id: E7-array-rows
+run_id: e7-001
+candidate: F6
+title: array edit through MCP and other locales (ALREADY REPORTED upstream as payloadcms/payload#19435, cited only)
+hypothesis: >-
+  An en edit of the items array through updatePosts (rows without ids) replaces the rows so the es labels are gone;
+  passing row ids is refused by the input schema; REST with row ids keeps the es labels.
+arms:
+  - name: test
+    role: test
+    description: MCP updatePosts of items in en (no row ids possible), then with a row id
+    reps: 5
+    reset: [post]
+    steps:
+      - { id: w, kind: call, tool: updatePosts, args: { id: 2, items: [{ label: Tomatoes, url: '/plants/tomato?v={{REP}}' }, { label: Beans, url: '/plants/bean' }, { label: Courgettes, url: '/plants/courgette' }] } }
+      - { id: es, kind: read, object: { path: '/api/posts/2?locale=es&depth=0&draft=true' } }
+      - { id: withids, kind: call, tool: updatePosts, args: { id: 2, items: [{ id: 'x', label: Tomatoes, url: '/plants/tomato' }] } }
+    counters:
+      es_lost: "es.obj.items[0].label != 'Tomates'"
+      ids_refused: "withids.text contains 'Unrecognized key'"
+    columns: { es0: 'es.obj.items[0].label' }
+  - name: control
+    role: control
+    description: REST PATCH of items in en with the row ids
+    reps: 5
+    reset: [post]
+    steps:
+      - { id: r, kind: read, object: { path: '/api/posts/2?locale=en&depth=0&draft=true' } }
+      - { id: w, kind: http, method: PATCH, path: '/api/posts/2?locale=en', body: { items: [{ id: '{{r.obj.items[0].id}}', label: Tomatoes, url: '/plants/tomato?v={{REP}}' }, { id: '{{r.obj.items[1].id}}', label: Beans, url: '/plants/bean' }, { id: '{{r.obj.items[2].id}}', label: Courgettes, url: '/plants/courgette' }] }, content_type: application/json }
+      - { id: es, kind: read, object: { path: '/api/posts/2?locale=es&depth=0&draft=true' } }
+    counters:
+      es_kept: "es.obj.items[0].label == 'Tomates'"
+verdict:
+  criterion: reproduced (known upstream, #19435) if every valid MCP repetition lost the es label and refused row ids while REST with ids kept it every time; not reproduced if the es label survived the MCP edit; otherwise inconclusive.
+  reproduced: { all: ['test.valid >= 3', 'test.es_lost == test.valid', 'test.ids_refused == test.valid', 'control.valid >= 3', 'control.es_kept == control.valid'] }
+  not_reproduced: { all: ['test.valid >= 3', 'test.es_lost == 0'] }

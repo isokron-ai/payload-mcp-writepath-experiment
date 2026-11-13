@@ -1,0 +1,34 @@
+format: isokron/probe-experiment@1
+id: E4-empty-where-delete
+run_id: e4-001
+candidate: F3
+title: deleteTasks with where "{}"
+hypothesis: deleteTasks {where:"{}"} deletes all 20 tasks; REST DELETE /api/tasks with no where is refused with HTTP 400.
+arms:
+  - name: test
+    role: test
+    description: MCP deleteTasks with where "{}"
+    reps: 5
+    reset: [task]
+    steps:
+      - { id: w, kind: call, tool: deleteTasks, args: { where: '{}' } }
+      - { id: after, kind: read, object: { path: '/api/tasks?limit=0&depth=0' } }
+    counters:
+      all_deleted: 'after.obj.totalDocs == 0'
+      flagged_error: 'w.isError'
+    columns: { left: after.obj.totalDocs, head: w.text }
+  - name: control
+    role: control
+    description: REST DELETE /api/tasks with no where
+    reps: 5
+    reset: [task]
+    steps:
+      - { id: w, kind: http, method: DELETE, path: /api/tasks }
+      - { id: after, kind: read, object: { path: '/api/tasks?limit=0&depth=0' } }
+    counters:
+      refused_400: 'w.status == 400'
+      kept_all: 'after.obj.totalDocs == 20'
+verdict:
+  criterion: reproduced if every valid MCP repetition deleted all tasks while REST refused with 400 and kept all 20; not reproduced if no MCP repetition deleted them all; otherwise inconclusive.
+  reproduced: { all: ['test.valid >= 3', 'test.all_deleted == test.valid', 'control.valid >= 3', 'control.refused_400 == control.valid', 'control.kept_all == control.valid'] }
+  not_reproduced: { all: ['test.valid >= 3', 'test.all_deleted == 0'] }

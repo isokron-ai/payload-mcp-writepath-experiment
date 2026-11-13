@@ -1,0 +1,48 @@
+format: isokron/probe-experiment@1
+id: E12-select-stale-update
+run_id: e12-v2
+title: update by id after a find whose select leaves createdAt out, with another writer in between (research v2.1)
+hypothesis: >-
+  findPosts with select {title, items, updatedAt} (no createdAt), then another writer changes the post's summary
+  through REST, then updatePosts by id (title, no ifUpdatedAt) is written with no signal: the read-version memory
+  recorded the read under a key the write never looks up (seen in the batching series, run v2-u9-3). Research v2.1 always records
+  the version fields, so the write is refused as stale and the other writer's summary stays.
+arms:
+  - name: test
+    role: test
+    description: MCP findPosts (select without createdAt), REST PATCH of the summary, MCP updatePosts by id (title)
+    reps: 5
+    reset: [post3]
+    steps:
+      - { id: r, kind: call, tool: findPosts, args: { where: '{"id":{"equals":3}}', select: { title: true, items: true, updatedAt: true } } }
+      - { id: b, kind: http, method: PATCH, path: /api/posts/3, body: { summary: 'S{{REP}}' }, content_type: application/json }
+      - { id: w, kind: call, tool: updatePosts, args: { id: 3, title: 'T{{REP}}' } }
+      - { id: final, kind: read, object: post3 }
+    counters:
+      written: "final.obj.doc.title.en == 'T{{REP}}'"
+      refused: "final.obj.doc.title.en != 'T{{REP}}'"
+      other_kept: "final.obj.doc.summary.en == 'S{{REP}}'"
+      flagged_error: 'w.isError'
+      names_stale: "w.text contains 'changed since you read it'"
+      select_kept: { not: "r.text contains 'createdAt'" }
+    columns: { isError: w.isError, head: w.text }
+  - name: control
+    role: control
+    description: the same find with no select (createdAt in the answer), REST PATCH, MCP updatePosts by id
+    reps: 5
+    reset: [post3]
+    steps:
+      - { id: r, kind: call, tool: findPosts, args: { where: '{"id":{"equals":3}}' } }
+      - { id: b, kind: http, method: PATCH, path: /api/posts/3, body: { summary: 'S{{REP}}' }, content_type: application/json }
+      - { id: w, kind: call, tool: updatePosts, args: { id: 3, title: 'T{{REP}}' } }
+      - { id: final, kind: read, object: post3 }
+    counters:
+      refused: "final.obj.doc.title.en != 'T{{REP}}'"
+      flagged_error: 'w.isError'
+verdict:
+  criterion: >-
+    reproduced (lost-update hole) if the update by id after the select read was written in every valid repetition
+    (at least 3) while the control (no select) was refused every time; not reproduced if it was refused, flagged
+    isError and said "changed since you read it" every time, with the other writer's summary kept; otherwise inconclusive.
+  reproduced: { all: ['test.valid >= 3', 'test.written == test.valid', 'control.valid >= 3', 'control.refused == control.valid'] }
+  not_reproduced: { all: ['test.valid >= 3', 'test.refused == test.valid', 'test.flagged_error == test.valid', 'test.names_stale == test.valid', 'test.other_kept == test.valid', 'control.valid >= 3', 'control.refused == control.valid'] }

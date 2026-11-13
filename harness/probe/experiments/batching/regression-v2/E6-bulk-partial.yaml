@@ -1,0 +1,39 @@
+format: isokron/probe-experiment@1
+id: E6-bulk-partial-research-v2
+run_id: v2-re6
+candidate: F5
+title: bulk update with one refused document
+hypothesis: >-
+  updateTasks with a where matching Ana's 5 tasks, one archived (the hook refuses it), commits the other 4 and answers
+  with its success headline and no isError; REST PATCH with the same where answers HTTP 400 with an errors list (and
+  also commits the 4: parity on the commit, difference in the signal).
+arms:
+  - name: test
+    role: test
+    description: MCP bulk updateTasks over Ana's tasks (one archived)
+    reps: 5
+    reset: [task]
+    steps:
+      - { id: w, kind: call, tool: updateTasks, args: { where: '{"owner":{"equals":"Ana"}}', priority: 5 } }
+      - { id: after, kind: read, object: { path: '/api/tasks?where[owner][equals]=Ana&where[priority][equals]=5&limit=0&depth=0' } }
+    counters:
+      committed_4: 'after.obj.totalDocs == 4'
+      success_headline: "w.text contains 'Multiple documents updated'"
+      lists_error: "w.text contains 'archived'"
+      flagged_error: 'w.isError'
+    columns: { at_5: after.obj.totalDocs, isError: w.isError }
+  - name: control
+    role: control
+    description: REST PATCH with the same where
+    reps: 5
+    reset: [task]
+    steps:
+      - { id: w, kind: http, method: PATCH, path: '/api/tasks?where[owner][equals]=Ana', body: { priority: 5 }, content_type: application/json }
+      - { id: after, kind: read, object: { path: '/api/tasks?where[owner][equals]=Ana&where[priority][equals]=5&limit=0&depth=0' } }
+    counters:
+      committed_4: 'after.obj.totalDocs == 4'
+      status_400: 'w.status == 400'
+verdict:
+  criterion: reproduced if every valid MCP repetition committed 4, carried the success headline and no isError, while REST answered 400 every time (committing the same 4); not reproduced if the MCP answer set isError; otherwise inconclusive.
+  reproduced: { all: ['test.valid >= 3', 'test.committed_4 == test.valid', 'test.success_headline == test.valid', 'test.flagged_error == 0', 'control.valid >= 3', 'control.status_400 == control.valid'] }
+  not_reproduced: { all: ['test.valid >= 3', 'test.flagged_error == test.valid'] }
