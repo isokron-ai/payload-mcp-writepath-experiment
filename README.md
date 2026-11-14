@@ -1,7 +1,7 @@
 > **Payload MCP plugin write-path experiment (unofficial).** An independent research build by
 > [IsoKron](https://isokron.ai) based on `@payloadcms/plugin-mcp` 3.93.0 from
 > [payloadcms/payload](https://github.com/payloadcms/payload) (commit `77425c50`), with 7 commits that change how its
-> collection tools write. It is not affiliated with or endorsed by Payload CMS, Inc. and is not a supported
+> collection tools write. It is not affiliated with or endorsed by Payload and is not a supported
 > distribution. On five pre-registered editing tasks, research build v1 completed 28 of 29 runs against 11 of 29 for
 > the unmodified plugin (Claude Opus 5.5 and a capture-off observer arm). The later v2 lost another editor's change in
 > 6 of 9 conflict runs; v2.1 fixes that and kept the other editor's change in 15 of 15 agent conflict runs while
