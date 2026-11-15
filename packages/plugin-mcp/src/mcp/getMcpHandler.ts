@@ -536,7 +536,7 @@ export const getMcpHandler = (
             'Several documents getting the same change or deletion: use ONE update/delete call whose ifUpdatedAt map names them (e.g. {"1":"<updatedAt>","2":"<updatedAt>"}), not one call per document.',
             'Every update/delete carries ifUpdatedAt: the updatedAt of the version your change is based on (find answers and write receipts carry it; a string with id, a map {"<id>":"<updatedAt>"} for several). A "Conflict" means that document changed since then and was NOT written: re-apply only your change to the current version it carries, retry with its updatedAt.',
             'Documents another user has open are locked: you get a Conflict naming them; do not pass overrideLock unless the user asked to take over.',
-            'Array rows carry an id: keep the ids of rows you keep, so their other-locale values survive; rows without an id are new.',
+            'Array rows carry an id: keep the ids of rows you keep, so their other-locale values survive; rows without an id are new (one identical to the stored row at the same position keeps that row\'s id).',
             'Bulk writes are best-effort and report per document; "PARTIAL" means some were refused or failed and NOT changed while the rest were applied. An empty where is refused unless all: true.',
             'Write answers are compact receipts; pass returnDocument: true for the whole document.',
           ].join('\n'),

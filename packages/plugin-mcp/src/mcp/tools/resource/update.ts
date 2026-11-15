@@ -34,6 +34,7 @@ import {
   versionArg,
   versionRequired,
 } from '../../helpers/writeSafety.js'
+import { hasArrays, keepRowIds } from '../../helpers/rowIds.js'
 import { strictArgs } from '../../helpers/strictArgs.js'
 import { toolSchemas } from '../schemas.js'
 
@@ -127,6 +128,22 @@ export const updateResourceTool = (
             return out(missingVersion({ action: 'update', collectionSlug, currentDoc, id, readTool }))
           }
           // a missing document is reported by the write itself
+        }
+        // C-row-ids (v2.2): rows re-sent unchanged without their ids keep them (stable ids on a repeated update).
+        if (hasArrays(parsedData) && o.locale !== 'all') {
+          const stored = (await payload
+            .findByID({
+              id,
+              collection: collectionSlug,
+              depth: 0,
+              draft: true,
+              overrideAccess: false,
+              user,
+              ...(o.locale && { locale: o.locale }),
+              ...(o.fallbackLocale && { fallbackLocale: o.fallbackLocale }),
+            } as never)
+            .catch(() => null)) as null | Record<string, unknown>
+          parsedData = keepRowIds(parsedData, stored)
         }
         const result = await payload.update({
           id,
