@@ -25,6 +25,7 @@ import {
   versionArg,
   versionRequired,
 } from '../../helpers/writeSafety.js'
+import { strictArgs } from '../../helpers/strictArgs.js'
 import { toolSchemas } from '../schemas.js'
 
 const toolName = (slug: string, verb: string) =>
@@ -170,7 +171,9 @@ export const deleteResourceTool = (
   }
 
   if (collections?.[collectionSlug]?.enabled) {
-    const deleteSchema = z.object({
+    // C-strict-args (v2.2): an argument the schema does not name is refused and named, never dropped.
+    const name = toolName(collectionSlug, 'delete')
+    const deleteSchema = strictArgs({
       ...toolSchemas.deleteResource.parameters.shape,
       all: z.boolean().optional().default(false).describe('Required to delete every document with an empty where clause'),
       ifUpdatedAt: versionArg(versionRequired(req, collectionSlug), 'delete'),
@@ -182,13 +185,13 @@ export const deleteResourceTool = (
           'Default false: a document another user has open for editing is not deleted, and you are told who has it. True deletes it anyway; only when the user asked for that',
         ),
       returnDocument: z.boolean().optional().default(false).describe('Return the whole deleted document instead of a compact receipt'),
-    })
+    }, name)
     server.registerTool(
-      toolName(collectionSlug, 'delete'),
+      name,
       {
         annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: false, readOnlyHint: false },
         description: `${collections?.[collectionSlug]?.description || toolSchemas.deleteResource.description.trim()}`,
-        inputSchema: deleteSchema.shape,
+        inputSchema: deleteSchema,
       },
       async (p: Record<string, unknown>) =>
         await tool({

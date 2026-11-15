@@ -4,6 +4,7 @@ import type { JoinQuery, PayloadRequest, PopulateType, SelectType, TypedUser } f
 import type { MCPPluginConfig } from '../../../types.js'
 
 import { toCamelCase } from '../../../utils/camelCase.js'
+import { strictArgs } from '../../helpers/strictArgs.js'
 import { versionSelect } from '../../helpers/writeSafety.js'
 import { toolSchemas } from '../schemas.js'
 
@@ -215,12 +216,14 @@ Page: ${result.page} of ${result.totalPages}
   }
 
   if (collections?.[collectionSlug]?.enabled) {
+    const name = `find${collectionSlug.charAt(0).toUpperCase() + toCamelCase(collectionSlug).slice(1)}`
     server.registerTool(
-      `find${collectionSlug.charAt(0).toUpperCase() + toCamelCase(collectionSlug).slice(1)}`,
+      name,
       {
         annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false, readOnlyHint: true },
         description: `${collections?.[collectionSlug]?.description || toolSchemas.findResources.description.trim()}`,
-        inputSchema: toolSchemas.findResources.parameters.shape,
+        // C-strict-args (v2.2): an argument the schema does not name is refused and named, never dropped.
+        inputSchema: strictArgs(toolSchemas.findResources.parameters.shape, name),
       },
       async ({
         id,
