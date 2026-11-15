@@ -246,7 +246,8 @@ export function versionArg(versioned: boolean, action: 'delete' | 'update') {
     .describe(
       `Required: the version your ${action} is based on (updatedAt, from a find answer or your last write receipt). With id: that updatedAt string. ` +
         `For several documents: a map {"<id>": "<updatedAt>"} (it selects those ids; with where, every match must be in it). ` +
-        `A document changed since that version is not ${verb}, whoever changed it; you get its current version`,
+        `A document changed since that version is not ${verb}, whoever changed it; you get its current version. ` +
+        `In a collection with drafts, the latest version is the latest draft (read with draft: true)`,
     )
   return versioned
     ? arg

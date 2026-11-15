@@ -99,6 +99,17 @@ describe('array row ids are stable when the same rows are sent again (MWS-ANN-3)
   })
 
   it('keepRowIds: blocks and nested arrays; a stored value the row leaves out must be empty', () => {
+    const fields = [
+      {
+        name: 'layout',
+        type: 'blocks',
+        blocks: [
+          { slug: 'hero', flattenedFields: [{ name: 'heading', type: 'text' }] },
+          { slug: 'cta', flattenedFields: [{ name: 'label', type: 'text' }, { name: 'links', type: 'array', flattenedFields: [{ name: 'href', type: 'text' }] }] },
+          { slug: 'quote', flattenedFields: [{ name: 'text', type: 'text' }, { name: 'attribution', type: 'text' }] },
+        ],
+      },
+    ]
     const stored = {
       layout: [
         { id: 'b1', blockName: null, blockType: 'hero', heading: 'Hi' },
@@ -115,10 +126,27 @@ describe('array row ids are stable when the same rows are sent again (MWS-ANN-3)
         ],
       },
       stored,
+      fields,
     ) as { layout: Array<Record<string, unknown>> }
     expect(out.layout[0]!.id).toBe('b1')
     expect(out.layout[1]!.id).toBe('b2')
     expect((out.layout[1]!.links as Array<{ id: string }>)[0]!.id).toBe('l1')
     expect(out.layout[2]!.id).toBeUndefined()
+  })
+
+  it('keepRowIds: a json field is left as sent, and an id sent anywhere is not filled in again', () => {
+    const json = keepRowIds({ meta: [{ name: 'y' }] }, { meta: [{ id: 'x', name: 'y' }] }, [{ name: 'meta', type: 'json' }])
+    expect(json).toEqual({ meta: [{ name: 'y' }] })
+    const fields = [
+      { name: 'items', type: 'array', flattenedFields: [{ name: 'subs', type: 'array', flattenedFields: [{ name: 't', type: 'text' }] }] },
+    ]
+    const out = keepRowIds(
+      { items: [{ subs: [{ t: 'a' }] }, { id: 'r1', subs: [{ id: 'n1', t: 'a' }] }] },
+      { items: [{ id: 'r0', subs: [{ id: 'n1', t: 'a' }] }, { id: 'r1', subs: [] }] },
+      fields,
+    ) as { items: Array<{ id?: string; subs: Array<{ id?: string }> }> }
+    expect(out.items[0]!.id).toBe('r0')
+    expect(out.items[0]!.subs[0]!.id).toBeUndefined()
+    expect(out.items[1]!.subs[0]!.id).toBe('n1')
   })
 })

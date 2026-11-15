@@ -27,11 +27,20 @@ export function unknownArgsMessage(toolName: string, keys: string[], known: stri
   )
 }
 
-/** The known name nearest to a misspelled one (case-insensitive edit distance of at most 2), if any. */
+/**
+ * The known name nearest to a misspelled one, if any: a case-insensitive edit distance of at most 1 for names of 3 or 4
+ * letters and 2 for longer ones (none for shorter ones). Arguments that widen a write (all, overrideLock) are never
+ * suggested.
+ */
+const NEVER_SUGGESTED = ['all', 'overrideLock']
 function closest(name: string, known: string[]): string | undefined {
+  const limit = name.length <= 2 ? 0 : name.length <= 4 ? 1 : 2
   let best: string | undefined
-  let bestD = 3
+  let bestD = limit + 1
   for (const k of known) {
+    if (NEVER_SUGGESTED.includes(k)) {
+      continue
+    }
     const d = distance(name.toLowerCase(), k.toLowerCase())
     if (d < bestD) {
       best = k
