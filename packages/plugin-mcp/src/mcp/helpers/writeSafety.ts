@@ -21,6 +21,24 @@ export type ToolResponse = {
 // Text only: the JSON in the text is the machine-readable part (no structuredContent copy of the same data).
 export const errorResponse = (text: string): ToolResponse => ({ content: [{ type: 'text', text }], isError: true })
 
+/**
+ * C-reason (research v2.2, PAY-13): the text of a failed write. Payload's ValidationError message names only the
+ * field ("The following field is invalid: Priority"); the reason is in error.data.errors. Both are passed on, so an
+ * agent can correct the value instead of guessing: "... Priority (priority: 9 is greater than the max allowed Value of 5.)".
+ */
+export function errorText(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return 'Unknown error'
+  }
+  const reasons = (error as { data?: { errors?: Array<{ label?: unknown; message?: unknown; path?: unknown }> } }).data?.errors
+  const parts = Array.isArray(reasons)
+    ? reasons
+        .filter((r) => r && typeof r.message === 'string' && r.message)
+        .map((r) => `${typeof r.path === 'string' && r.path ? `${r.path}: ` : ''}${String(r.message)}`)
+    : []
+  return parts.length ? `${error.message} (${parts.join('; ')})` : error.message
+}
+
 export const isLockedError = (error: unknown): boolean =>
   error instanceof Error &&
   (error.name === 'Locked' || (error as { status?: number }).status === 423 || /currently locked/i.test(error.message))

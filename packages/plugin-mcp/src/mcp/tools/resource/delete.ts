@@ -12,6 +12,7 @@ import {
   currentDocument,
   currentUpdatedAt,
   errorResponse,
+  errorText,
   idsOf,
   isLockedError,
   isVersionMap,
@@ -164,7 +165,7 @@ export const deleteResourceTool = (
         const info = await lockInfo({ collectionSlug, id, req, user })
         return out(lockConflict({ action: 'delete', collectionSlug, current: await currentDocument({ collectionSlug, id, req, user }), id, info, readTool }))
       }
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+      const errorMessage = errorText(error)
       payload.logger.error(`[payload-mcp] Error deleting resource from ${collectionSlug}: ${errorMessage}`)
       return out(errorResponse(`Error deleting resource from collection "${collectionSlug}": ${errorMessage}`))
     }

@@ -19,6 +19,7 @@ import {
   currentDocument,
   currentUpdatedAt,
   errorResponse,
+  errorText,
   idsOf,
   isLockedError,
   isVersionMap,
@@ -200,7 +201,7 @@ export const updateResourceTool = (
         const info = await lockInfo({ collectionSlug, id, req, user })
         return out(lockConflict({ action: 'update', collectionSlug, current: await currentDocument({ collectionSlug, id, req, user }), id, info, readTool }))
       }
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+      const errorMessage = errorText(error)
       payload.logger.error(`[payload-mcp] Error updating resource in ${collectionSlug}: ${errorMessage}`)
       return out(errorResponse(`Error updating resource in collection "${collectionSlug}": ${errorMessage}`))
     }
