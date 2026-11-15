@@ -1,4 +1,4 @@
-{ "build": "research-v2-2", "base": "@payloadcms/plugin-mcp 3.93.0 (npm) / v3.93.0 77425c50", "source_commit": "8642af5aaabb0dbee82abc34d34a4e805eb2dc50",
+{ "build": "research-v2-2", "base": "@payloadcms/plugin-mcp 3.93.0 (npm) / v3.93.0 77425c50", "source_commit": "45c7dbb905d1eca7847ea45a73b5bed9cc73edbc",
   "dirty_source": false,
   "files": 9, "esbuild": "0.25.12", "built_at": "2026-11-15T20:33:36Z",
   "note": "the build hand-checked on 15 Nov 2026 (harness/build/build.sh app research-v2-2); source_commit is in this repository" }

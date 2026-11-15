@@ -1,0 +1,505 @@
+From 45c7dbb905d1eca7847ea45a73b5bed9cc73edbc Mon Sep 17 00:00:00 2001
+From: Joshua Bryan <45343084+rafe-walker@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 13:48:57 -0700
+Subject: [PATCH 12/12] fix(plugin-mcp): review fixes for research v2.2
+
+From a second review of commits 8 to 11:
+
+- Version check: an update or delete by id without a usable version
+  (ifUpdatedAt "", {}, or a map that does not name the id) was let through
+  when the current document could not be read (no read access, a failing
+  hook). It is now refused whether or not that read succeeds.
+- Collections without timestamps: ifUpdatedAt is neither required nor
+  checked, by id or in bulk (it used to refuse a sent version as "gone" by id
+  and to refuse unnamed matches in bulk).
+- Row ids: the stored document is read with fallbackLocale "none", so rows
+  shown from a fallback locale (and their ids) are never adopted. Only array
+  and blocks fields of the collection config have rows; a json field holding
+  a list of objects is left as sent. An id sent anywhere in the data is
+  never filled in for another row, nested rows included.
+- Unknown-argument suggestions: no suggestion for names of one or two
+  letters, an edit distance of 1 for three or four, and never all or
+  overrideLock.
+- "nothing to write" mentions the data argument only where it exists. The
+  ifUpdatedAt description says that in a collection with drafts the latest
+  version is the latest draft.
+
+Tests: 4 more (33 in all), each failing before this commit.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ packages/plugin-mcp/src/mcp/helpers/rowIds.ts | 117 +++++++++++-------
+ .../plugin-mcp/src/mcp/helpers/strictArgs.ts  |  13 +-
+ .../plugin-mcp/src/mcp/helpers/writeSafety.ts |   3 +-
+ .../src/mcp/tools/resource/delete.ts          |  13 +-
+ .../tools/resource/fakePayload.spec-utils.ts  |  26 +++-
+ .../src/mcp/tools/resource/rowIds.spec.ts     |  28 +++++
+ .../tools/resource/unknownArguments.spec.ts   |  11 ++
+ .../src/mcp/tools/resource/update.ts          |  24 ++--
+ .../resource/versionPrecondition.spec.ts      |  27 ++++
+ 9 files changed, 190 insertions(+), 72 deletions(-)
+
+diff --git a/packages/plugin-mcp/src/mcp/helpers/rowIds.ts b/packages/plugin-mcp/src/mcp/helpers/rowIds.ts
+index 42d4a32..ca7bd26 100644
+--- a/packages/plugin-mcp/src/mcp/helpers/rowIds.ts
++++ b/packages/plugin-mcp/src/mcp/helpers/rowIds.ts
+@@ -4,53 +4,92 @@
+  * them all: the row ids changed on every call (the update tools declare idempotentHint: true) and the rows' values in
+  * other locales were lost. A row sent without an id that is identical to the stored row at the same position (every
+  * value it sends equal, every value it leaves out empty in the stored row) now keeps that row's id, as if the caller
+- * had sent it. A row that differs in any value, or that moved, is still a new row. An id is never given to two rows.
++ * had sent it. A row that differs in any value, or that moved, is still a new row.
++ *
++ * Only array and blocks fields of the collection's config have rows (a json field holding a list of objects does not,
++ * and is left as sent). An id is never given to two rows: ids the caller sent anywhere in the data, and ids already
++ * filled in, are not filled in again.
+  */
+ type Plain = Record<string, unknown>
++type Field = {
++  blocks?: Array<{ flattenedFields?: Field[]; slug: string }>
++  flattenedFields?: Field[]
++  name?: string
++  type: string
++}
+ 
+ const isPlain = (v: unknown): v is Plain => v !== null && typeof v === 'object' && !Array.isArray(v)
+ const isEmpty = (v: unknown) => v === null || v === undefined
+ 
+-/** The data to write, with the ids of unchanged rows filled in from the stored document. */
+-export function keepRowIds(data: Plain, stored: null | Plain | undefined): Plain {
+-  return isPlain(stored) ? (keepFields(data, stored) as Plain) : data
++/** The data to write, with the ids of unchanged rows filled in from the stored document (read without fallback). */
++export function keepRowIds(data: Plain, stored: null | Plain | undefined, fields: Field[] | undefined): Plain {
++  if (!isPlain(stored) || !Array.isArray(fields)) {
++    return data
++  }
++  const taken = new Set<string>()
++  collectIds(data, taken)
++  return keepFields(data, stored, fields, taken)
+ }
+ 
+ /** True when any value in the data is an array (only then can rows lose their ids). */
+ export const hasArrays = (data: Plain): boolean =>
+   Object.values(data).some((v) => Array.isArray(v) || (isPlain(v) && hasArrays(v)))
+ 
+-function keepFields(sent: Plain, stored: Plain): Plain {
+-  const out: Plain = {}
+-  for (const [k, v] of Object.entries(sent)) {
+-    out[k] = keep(v, stored[k])
++function collectIds(v: unknown, taken: Set<string>): void {
++  if (Array.isArray(v)) {
++    v.forEach((x) => collectIds(x, taken))
++  } else if (isPlain(v)) {
++    if (!isEmpty(v.id)) {
++      taken.add(String(v.id))
++    }
++    Object.values(v).forEach((x) => collectIds(x, taken))
+   }
+-  return out
+ }
+ 
+-function keep(sent: unknown, stored: unknown): unknown {
+-  if (Array.isArray(sent) && Array.isArray(stored)) {
+-    const taken = new Set(sent.filter((r) => isPlain(r) && !isEmpty(r.id)).map((r) => String((r as Plain).id)))
+-    return sent.map((row, i) => {
+-      if (!isPlain(row)) {
+-        return row
+-      }
+-      if (!isEmpty(row.id)) {
+-        const same = stored.find((r) => isPlain(r) && String(r.id) === String(row.id))
+-        return isPlain(same) ? keepFields(row, same) : row
+-      }
+-      const at = stored[i]
+-      if (isPlain(at) && !isEmpty(at.id) && !taken.has(String(at.id)) && sameContent(row, at)) {
+-        taken.add(String(at.id))
+-        return adopt(row, at)
+-      }
+-      return row
+-    })
++function keepFields(sent: Plain, stored: Plain, fields: Field[], taken: Set<string>): Plain {
++  const out: Plain = { ...sent }
++  for (const f of fields) {
++    if (!f.name || !(f.name in sent)) {
++      continue
++    }
++    const v = sent[f.name]
++    if ((f.type === 'array' || f.type === 'blocks') && Array.isArray(v) && Array.isArray(stored[f.name])) {
++      out[f.name] = keepRows(v, stored[f.name] as unknown[], f, taken)
++    } else if ((f.type === 'group' || f.type === 'tab') && isPlain(v) && isPlain(stored[f.name]) && f.flattenedFields) {
++      out[f.name] = keepFields(v, stored[f.name] as Plain, f.flattenedFields, taken)
++    }
+   }
+-  if (isPlain(sent) && isPlain(stored)) {
+-    return keepFields(sent, stored)
++  return out
++}
++
++/** The fields of one row: the array's fields, or the fields of the row's block. */
++function rowFields(row: Plain, field: Field): Field[] | undefined {
++  if (field.type === 'array') {
++    return field.flattenedFields
+   }
+-  return sent
++  return field.blocks?.find((b) => b.slug === row.blockType)?.flattenedFields
++}
++
++function keepRows(sent: unknown[], stored: unknown[], field: Field, taken: Set<string>): unknown[] {
++  return sent.map((row, i) => {
++    if (!isPlain(row)) {
++      return row
++    }
++    const fields = rowFields(row, field)
++    if (!fields) {
++      return row
++    }
++    if (!isEmpty(row.id)) {
++      const same = stored.find((r) => isPlain(r) && String(r.id) === String(row.id))
++      return isPlain(same) ? keepFields(row, same, fields, taken) : row
++    }
++    const at = stored[i]
++    if (isPlain(at) && !isEmpty(at.id) && !taken.has(String(at.id)) && sameContent(row, at)) {
++      taken.add(String(at.id))
++      return { ...keepFields(row, at, fields, taken), id: at.id }
++    }
++    return row
++  })
+ }
+ 
+ /** Equal values, ignoring the ids the sent side leaves out; a value the sent side leaves out must be empty. */
+@@ -74,21 +113,3 @@ function sameContent(sent: unknown, stored: unknown): boolean {
+   }
+   return sent === stored || (isEmpty(sent) && isEmpty(stored))
+ }
+-
+-/** The sent row with the stored ids filled in where it left them out (the content is the same, so is the shape). */
+-function adopt(sent: unknown, stored: unknown): unknown {
+-  if (Array.isArray(sent) && Array.isArray(stored)) {
+-    return sent.map((v, i) => adopt(v, stored[i]))
+-  }
+-  if (isPlain(sent) && isPlain(stored)) {
+-    const out: Plain = {}
+-    for (const [k, v] of Object.entries(sent)) {
+-      out[k] = adopt(v, stored[k])
+-    }
+-    if (isEmpty(sent.id) && !isEmpty(stored.id)) {
+-      out.id = stored.id
+-    }
+-    return out
+-  }
+-  return sent
+-}
+diff --git a/packages/plugin-mcp/src/mcp/helpers/strictArgs.ts b/packages/plugin-mcp/src/mcp/helpers/strictArgs.ts
+index 502b702..a651ea9 100644
+--- a/packages/plugin-mcp/src/mcp/helpers/strictArgs.ts
++++ b/packages/plugin-mcp/src/mcp/helpers/strictArgs.ts
+@@ -27,11 +27,20 @@ export function unknownArgsMessage(toolName: string, keys: string[], known: stri
+   )
+ }
+ 
+-/** The known name nearest to a misspelled one (case-insensitive edit distance of at most 2), if any. */
++/**
++ * The known name nearest to a misspelled one, if any: a case-insensitive edit distance of at most 1 for names of 3 or 4
++ * letters and 2 for longer ones (none for shorter ones). Arguments that widen a write (all, overrideLock) are never
++ * suggested.
++ */
++const NEVER_SUGGESTED = ['all', 'overrideLock']
+ function closest(name: string, known: string[]): string | undefined {
++  const limit = name.length <= 2 ? 0 : name.length <= 4 ? 1 : 2
+   let best: string | undefined
+-  let bestD = 3
++  let bestD = limit + 1
+   for (const k of known) {
++    if (NEVER_SUGGESTED.includes(k)) {
++      continue
++    }
+     const d = distance(name.toLowerCase(), k.toLowerCase())
+     if (d < bestD) {
+       best = k
+diff --git a/packages/plugin-mcp/src/mcp/helpers/writeSafety.ts b/packages/plugin-mcp/src/mcp/helpers/writeSafety.ts
+index d651813..a6c42b8 100644
+--- a/packages/plugin-mcp/src/mcp/helpers/writeSafety.ts
++++ b/packages/plugin-mcp/src/mcp/helpers/writeSafety.ts
+@@ -246,7 +246,8 @@ export function versionArg(versioned: boolean, action: 'delete' | 'update') {
+     .describe(
+       `Required: the version your ${action} is based on (updatedAt, from a find answer or your last write receipt). With id: that updatedAt string. ` +
+         `For several documents: a map {"<id>": "<updatedAt>"} (it selects those ids; with where, every match must be in it). ` +
+-        `A document changed since that version is not ${verb}, whoever changed it; you get its current version`,
++        `A document changed since that version is not ${verb}, whoever changed it; you get its current version. ` +
++        `In a collection with drafts, the latest version is the latest draft (read with draft: true)`,
+     )
+   return versioned
+     ? arg
+diff --git a/packages/plugin-mcp/src/mcp/tools/resource/delete.ts b/packages/plugin-mcp/src/mcp/tools/resource/delete.ts
+index a99e18b..2578627 100644
+--- a/packages/plugin-mcp/src/mcp/tools/resource/delete.ts
++++ b/packages/plugin-mcp/src/mcp/tools/resource/delete.ts
+@@ -72,7 +72,8 @@ export const deleteResourceTool = (
+       )
+     }
+     const checked = versionRequired(req, collectionSlug)
+-    const pin = typeof o.ifUpdatedAt === 'string' ? o.ifUpdatedAt : id !== undefined ? versions?.[String(id)] : undefined
++    // A collection without timestamps has no version to compare: ifUpdatedAt is not checked there (only a map's ids select).
++    const pin = !checked ? undefined : typeof o.ifUpdatedAt === 'string' ? o.ifUpdatedAt : id !== undefined ? versions?.[String(id)] : undefined
+     const deleteOptions: Record<string, unknown> = {
+       collection: collectionSlug,
+       depth: o.depth,
+@@ -111,11 +112,9 @@ export const deleteResourceTool = (
+             return out(staleConflict({ action: 'delete', collectionSlug, current, currentDoc: await currentDocument({ collectionSlug, id, req, user }), id, readTool, sent: pin }))
+           }
+         } else if (checked) {
+-          // C-version (v2.2): a delete without the version it is based on is refused.
+-          const currentDoc = await currentDocument({ collectionSlug, id, req, user })
+-          if (currentDoc) {
+-            return out(missingVersion({ action: 'delete', collectionSlug, currentDoc, id, readTool }))
+-          }
++          // C-version (v2.2): a delete without the version it is based on is refused, whether or not the current
++          // document can be read (a failed read must not skip the check).
++          return out(missingVersion({ action: 'delete', collectionSlug, currentDoc: await currentDocument({ collectionSlug, id, req, user }), id, readTool }))
+         }
+         const result = (await payload.delete(deleteOptions as never)) as unknown as Record<string, unknown>
+         if (o.returnDocument) {
+@@ -139,7 +138,7 @@ export const deleteResourceTool = (
+       if (checked && !versions) {
+         return out(errorResponse('Error: a bulk delete needs ifUpdatedAt as a map {"<id>": "<updatedAt>"} with the version of each document you read. Nothing was deleted.'))
+       }
+-      const pre = await bulkPreflight({ collectionSlug, req, user, versions, where: whereClause })
++      const pre = await bulkPreflight({ collectionSlug, req, user, versions: checked ? versions : undefined, where: whereClause })
+       let docs: Record<string, unknown>[] = []
+       let errors: { id?: unknown; message?: string }[] = []
+       if (pre.allowed.length) {
+diff --git a/packages/plugin-mcp/src/mcp/tools/resource/fakePayload.spec-utils.ts b/packages/plugin-mcp/src/mcp/tools/resource/fakePayload.spec-utils.ts
+index fd0dd98..a0e1b28 100644
+--- a/packages/plugin-mcp/src/mcp/tools/resource/fakePayload.spec-utils.ts
++++ b/packages/plugin-mcp/src/mcp/tools/resource/fakePayload.spec-utils.ts
+@@ -148,7 +148,21 @@ export function createStore() {
+   }
+ 
+   const payload = {
+-    collections: { posts: { config: { timestamps: true } }, tasks: { config: { timestamps: true } } },
++    collections: {
++      posts: {
++        config: {
++          flattenedFields: [
++            { name: 'title', type: 'text' },
++            { name: 'author', type: 'text' },
++            { name: 'items', type: 'array', flattenedFields: [{ name: 'label', type: 'text' }, { name: 'url', type: 'text' }] },
++          ],
++          timestamps: true,
++        },
++      },
++      tasks: { config: { flattenedFields: [], timestamps: true } },
++    } as Record<string, { config: { flattenedFields: unknown[]; timestamps: boolean } }>,
++    /** Test hook: when set, findByID throws for this collection (a read the user may not make, a failing hook). */
++    failReads: undefined as string | undefined,
+     config: { collections: [{ slug: 'posts', flattenedFields: [] }, { slug: 'tasks', flattenedFields: [] }] },
+     count: async ({ collection }: { collection: string }) => ({ totalDocs: docs[collection]!.size }),
+     create: async ({ collection, data }: { collection: string; data: Record<string, unknown> }) => {
+@@ -177,8 +191,14 @@ export function createStore() {
+       const hit = [...docs[collection]!.values()].filter((d) => matches(d, where)).map((d) => select(d, sel))
+       return { docs: hit, page: 1, totalDocs: hit.length, totalPages: 1 }
+     },
+-    findByID: async ({ id, collection, select: sel }: { collection: string; id: number | string; select?: Record<string, unknown> }) =>
+-      select(get(collection, id), sel),
++    findByID: async ({ id, collection, select: sel }: { collection: string; id: number | string; select?: Record<string, unknown> }) => {
++      if (payload.failReads === collection) {
++        const e = new Error('You are not allowed to perform this action.')
++        e.name = 'Forbidden'
++        throw e
++      }
++      return select(get(collection, id), sel)
++    },
+     logger: { error: () => {}, info: () => {}, warn: () => {} },
+     update: async ({ id, collection, data, where }: { collection: string; data: Record<string, unknown>; id?: number; where?: Record<string, unknown> }) => {
+       if (id !== undefined) {
+diff --git a/packages/plugin-mcp/src/mcp/tools/resource/rowIds.spec.ts b/packages/plugin-mcp/src/mcp/tools/resource/rowIds.spec.ts
+index 456c880..e6c3d67 100644
+--- a/packages/plugin-mcp/src/mcp/tools/resource/rowIds.spec.ts
++++ b/packages/plugin-mcp/src/mcp/tools/resource/rowIds.spec.ts
+@@ -99,6 +99,17 @@ describe('array row ids are stable when the same rows are sent again (MWS-ANN-3)
+   })
+ 
+   it('keepRowIds: blocks and nested arrays; a stored value the row leaves out must be empty', () => {
++    const fields = [
++      {
++        name: 'layout',
++        type: 'blocks',
++        blocks: [
++          { slug: 'hero', flattenedFields: [{ name: 'heading', type: 'text' }] },
++          { slug: 'cta', flattenedFields: [{ name: 'label', type: 'text' }, { name: 'links', type: 'array', flattenedFields: [{ name: 'href', type: 'text' }] }] },
++          { slug: 'quote', flattenedFields: [{ name: 'text', type: 'text' }, { name: 'attribution', type: 'text' }] },
++        ],
++      },
++    ]
+     const stored = {
+       layout: [
+         { id: 'b1', blockName: null, blockType: 'hero', heading: 'Hi' },
+@@ -115,10 +126,27 @@ describe('array row ids are stable when the same rows are sent again (MWS-ANN-3)
+         ],
+       },
+       stored,
++      fields,
+     ) as { layout: Array<Record<string, unknown>> }
+     expect(out.layout[0]!.id).toBe('b1')
+     expect(out.layout[1]!.id).toBe('b2')
+     expect((out.layout[1]!.links as Array<{ id: string }>)[0]!.id).toBe('l1')
+     expect(out.layout[2]!.id).toBeUndefined()
+   })
++
++  it('keepRowIds: a json field is left as sent, and an id sent anywhere is not filled in again', () => {
++    const json = keepRowIds({ meta: [{ name: 'y' }] }, { meta: [{ id: 'x', name: 'y' }] }, [{ name: 'meta', type: 'json' }])
++    expect(json).toEqual({ meta: [{ name: 'y' }] })
++    const fields = [
++      { name: 'items', type: 'array', flattenedFields: [{ name: 'subs', type: 'array', flattenedFields: [{ name: 't', type: 'text' }] }] },
++    ]
++    const out = keepRowIds(
++      { items: [{ subs: [{ t: 'a' }] }, { id: 'r1', subs: [{ id: 'n1', t: 'a' }] }] },
++      { items: [{ id: 'r0', subs: [{ id: 'n1', t: 'a' }] }, { id: 'r1', subs: [] }] },
++      fields,
++    ) as { items: Array<{ id?: string; subs: Array<{ id?: string }> }> }
++    expect(out.items[0]!.id).toBe('r0')
++    expect(out.items[0]!.subs[0]!.id).toBeUndefined()
++    expect(out.items[1]!.subs[0]!.id).toBe('n1')
++  })
+ })
+diff --git a/packages/plugin-mcp/src/mcp/tools/resource/unknownArguments.spec.ts b/packages/plugin-mcp/src/mcp/tools/resource/unknownArguments.spec.ts
+index d319557..5372c34 100644
+--- a/packages/plugin-mcp/src/mcp/tools/resource/unknownArguments.spec.ts
++++ b/packages/plugin-mcp/src/mcp/tools/resource/unknownArguments.spec.ts
+@@ -98,4 +98,15 @@ describe('unknown arguments are refused and named (PAY-11)', () => {
+     expect(u.isError).toBe(false)
+     expect(store.read('tasks', task.id).owner).toBe('bob')
+   })
++
++  it('never suggests an argument that widens a write, and gives no suggestion for very short names', async () => {
++    const task = await seedTask()
++    const a = await connect(store)
++    const r1 = await a.call('updateTasks', { id: task.id, ifUpdatedAt: task.updatedAt, al: true, owner: 'x' })
++    expect(r1.isError).toBe(true)
++    expect(r1.text).toContain('"al"')
++    expect(r1.text).not.toMatch(/did you mean "all"/)
++    const r2 = await a.call('updateTasks', { id: task.id, ifUpdatedAt: task.updatedAt, overideLock: true, owner: 'x' })
++    expect(r2.text).not.toMatch(/did you mean "overrideLock"/)
++  })
+ })
+diff --git a/packages/plugin-mcp/src/mcp/tools/resource/update.ts b/packages/plugin-mcp/src/mcp/tools/resource/update.ts
+index 3de80d0..56623af 100644
+--- a/packages/plugin-mcp/src/mcp/tools/resource/update.ts
++++ b/packages/plugin-mcp/src/mcp/tools/resource/update.ts
+@@ -55,6 +55,7 @@ export const updateResourceTool = (
+     (collections?.[collectionSlug]?.overrideResponse?.(response as never, result as never, req) ||
+       response) as ToolResponse
+ 
++  let hasDataArg = false
+   const tool = async (o: {
+     all: boolean
+     data: Record<string, unknown>
+@@ -74,12 +75,14 @@ export const updateResourceTool = (
+     const versions = isVersionMap(o.ifUpdatedAt) ? o.ifUpdatedAt : undefined
+     // C-bulk-versions (v2): a version map alone selects the documents it names.
+     const where = o.where ?? (id === undefined && versions && Object.keys(versions).length ? JSON.stringify({ id: { in: idsOf(versions) } }) : undefined)
+-    const pin = typeof o.ifUpdatedAt === 'string' ? o.ifUpdatedAt : id !== undefined ? versions?.[String(id)] : undefined
++    const checked = versionRequired(req, collectionSlug)
++    // A collection without timestamps has no version to compare: ifUpdatedAt is not checked there (only a map's ids select).
++    const pin = !checked ? undefined : typeof o.ifUpdatedAt === 'string' ? o.ifUpdatedAt : id !== undefined ? versions?.[String(id)] : undefined
+     let parsedData = transformPointDataToPayload(o.data)
+     parsedData = stripVirtualFields(parsedData, getCollectionVirtualFieldNames(payload.config, collectionSlug))
+     const written = Object.keys(parsedData)
+     if (written.length === 0) {
+-      return out(errorResponse(`Error: nothing to write. Pass the fields to change (or put them under data).`))
++      return out(errorResponse(`Error: nothing to write. Pass the fields to change${hasDataArg ? ' (or put them under data)' : ''}.`))
+     }
+ 
+     if (id === undefined && !where) {
+@@ -92,7 +95,6 @@ export const updateResourceTool = (
+         ),
+       )
+     }
+-    const checked = versionRequired(req, collectionSlug)
+ 
+     let whereClause: Record<string, unknown> = {}
+     if (id === undefined && where) {
+@@ -123,11 +125,8 @@ export const updateResourceTool = (
+             return out(staleConflict({ action: 'update', collectionSlug, current, currentDoc: await currentDocument({ collectionSlug, id, req, user }), id, readTool, sent: pin }))
+           }
+         } else if (checked) {
+-          const currentDoc = await currentDocument({ collectionSlug, id, req, user })
+-          if (currentDoc) {
+-            return out(missingVersion({ action: 'update', collectionSlug, currentDoc, id, readTool }))
+-          }
+-          // a missing document is reported by the write itself
++          // Refused whether or not the current document can be read (a failed read must not skip the check).
++          return out(missingVersion({ action: 'update', collectionSlug, currentDoc: await currentDocument({ collectionSlug, id, req, user }), id, readTool }))
+         }
+         // C-row-ids (v2.2): rows re-sent unchanged without their ids keep them (stable ids on a repeated update).
+         if (hasArrays(parsedData) && o.locale !== 'all') {
+@@ -140,10 +139,12 @@ export const updateResourceTool = (
+               overrideAccess: false,
+               user,
+               ...(o.locale && { locale: o.locale }),
+-              ...(o.fallbackLocale && { fallbackLocale: o.fallbackLocale }),
++              // the rows stored in this locale only: a fallback locale's rows (and ids) must not be adopted
++              fallbackLocale: 'none',
+             } as never)
+             .catch(() => null)) as null | Record<string, unknown>
+-          parsedData = keepRowIds(parsedData, stored)
++          const fields = (payload.collections?.[collectionSlug as never] as unknown as { config?: { flattenedFields?: Parameters<typeof keepRowIds>[2] } } | undefined)?.config?.flattenedFields
++          parsedData = keepRowIds(parsedData, stored, fields)
+         }
+         const result = await payload.update({
+           id,
+@@ -182,7 +183,7 @@ export const updateResourceTool = (
+       if (checked && !versions) {
+         return out(errorResponse('Error: a bulk update needs ifUpdatedAt as a map {"<id>": "<updatedAt>"} with the version of each document you read. Nothing was changed.'))
+       }
+-      const pre = await bulkPreflight({ collectionSlug, req, user, versions, where: whereClause })
++      const pre = await bulkPreflight({ collectionSlug, req, user, versions: checked ? versions : undefined, where: whereClause })
+       let docs: Record<string, unknown>[] = []
+       let errors: { id?: unknown; message?: string }[] = []
+       if (pre.allowed.length) {
+@@ -230,6 +231,7 @@ export const updateResourceTool = (
+     // C-args: fields whose names collide with an operation argument are only reachable through `data`.
+     const flatFields = Object.fromEntries(Object.entries(fieldShape).filter(([k]) => !OPERATION_ARGS.includes(k)))
+     const colliding = Object.keys(fieldShape).filter((k) => OPERATION_ARGS.includes(k))
++    hasDataArg = colliding.length > 0
+ 
+     // C-strict-args (v2.2): an argument the schema does not name is refused and named, never dropped.
+     const name = toolName(collectionSlug, 'update')
+diff --git a/packages/plugin-mcp/src/mcp/tools/resource/versionPrecondition.spec.ts b/packages/plugin-mcp/src/mcp/tools/resource/versionPrecondition.spec.ts
+index c9c79ae..cb36b24 100644
+--- a/packages/plugin-mcp/src/mcp/tools/resource/versionPrecondition.spec.ts
++++ b/packages/plugin-mcp/src/mcp/tools/resource/versionPrecondition.spec.ts
+@@ -181,4 +181,31 @@ describe('per-write version precondition (PAY-09)', () => {
+     expect(jsonIn(w.text).currentDocument).toMatchObject({ id: task.id, owner: 'ann' })
+     expect(store.read('tasks', task.id).owner).toBe('ann')
+   })
++
++  it('a write without a usable version is refused even when the current document cannot be read', async () => {
++    const task = await seedTask('t')
++    const a = await connect(store)
++    store.payload.failReads = 'tasks'
++    for (const ifUpdatedAt of ['', {}, { '999': 'x' }]) {
++      const u = await a.call('updateTasks', { id: task.id, ifUpdatedAt, owner: 'mallory' })
++      expect(u.isError, JSON.stringify(ifUpdatedAt)).toBe(true)
++      const d = await a.call('deleteTasks', { id: task.id, ifUpdatedAt })
++      expect(d.isError, JSON.stringify(ifUpdatedAt)).toBe(true)
++    }
++    store.payload.failReads = undefined
++    expect(store.read('tasks', task.id).owner).toBe('ann')
++  })
++
++  it('a collection without timestamps does not check or require ifUpdatedAt', async () => {
++    const task = await seedTask('t')
++    store.payload.collections.tasks!.config.timestamps = false
++    const a = await connect(store)
++    const t = (await a.tools()).find((x) => x.name === 'updateTasks')!
++    expect(t.inputSchema.required ?? []).not.toContain('ifUpdatedAt')
++    expect((await a.call('updateTasks', { id: task.id, owner: 'b' })).isError).toBe(false)
++    expect((await a.call('updateTasks', { id: task.id, owner: 'c', ifUpdatedAt: 'anything' })).isError).toBe(false)
++    const bulk = await a.call('updateTasks', { ifUpdatedAt: { [task.id]: 'anything' }, owner: 'd' })
++    expect(bulk.isError).toBe(false)
++    expect(store.read('tasks', task.id).owner).toBe('d')
++  })
+ })
+-- 
+2.50.1 (Apple Git-155)
+

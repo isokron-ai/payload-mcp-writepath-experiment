@@ -1,7 +1,7 @@
 From 85fa21ed836fce7cf099d12a1c03b79687fdc340 Mon Sep 17 00:00:00 2001
 From: Joshua Bryan <45343084+rafe-walker@users.noreply.github.com>
 Date: Sun, 15 Nov 2026 13:24:27 -0700
-Subject: [PATCH 10/11] fix(plugin-mcp): pass the reason of a validation
+Subject: [PATCH 10/12] fix(plugin-mcp): pass the reason of a validation
  refusal through (research v2.2)
 
 Research v1 set isError on a refused create or update, but the text kept only

@@ -1,7 +1,7 @@
 From 8642af5aaabb0dbee82abc34d34a4e805eb2dc50 Mon Sep 17 00:00:00 2001
 From: Joshua Bryan <45343084+rafe-walker@users.noreply.github.com>
 Date: Sun, 15 Nov 2026 13:25:50 -0700
-Subject: [PATCH 11/11] fix(plugin-mcp): keep array row ids when the same rows
+Subject: [PATCH 11/12] fix(plugin-mcp): keep array row ids when the same rows
  are sent again (research v2.2)
 
 The update tools declare idempotentHint: true, but Payload gives every array or

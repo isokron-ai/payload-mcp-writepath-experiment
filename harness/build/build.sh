@@ -17,7 +17,7 @@
 #                                                 the transpiled files (MCP_BUILD=<name> harness/sandbox/serve.sh)
 #
 # Builds: upstream = tag upstream-v3.93.0; v1 = research-v1-v3.93.0 (patches 0001-0005, the benchmarked build);
-# v2 = research-v2-v3.93.0 (+0006); v2.1 = research-v2.1-v3.93.0 (+0007); v2.2 = research-v2.2-v3.93.0 (+0008-0011;
+# v2 = research-v2-v3.93.0 (+0006); v2.1 = research-v2.1-v3.93.0 (+0007); v2.2 = research-v2.2-v3.93.0 (+0008-0012;
 # packages/plugin-mcp on main is v2.2). Until the v2.2 tag exists, v2.2 is checked against HEAD.
 # ESBUILD may point at an esbuild 0.25.12 binary; otherwise harness/app's copy is used (after `pnpm install` in
 # harness/app), then `npx esbuild@0.25.12`. Nothing here needs network access except pnpm/npx, and nothing writes outside
@@ -33,7 +33,7 @@ build_tag() { case "$1" in v1) echo research-v1-v3.93.0;; v2) echo research-v2-v
   v2.2) if git -C "$REPO" rev-parse -q --verify refs/tags/research-v2.2-v3.93.0 >/dev/null; then echo research-v2.2-v3.93.0; else echo HEAD; fi;;
   *) echo "unknown build $1 (v1, v2, v2.1, v2.2)" >&2; exit 2;; esac; }
 build_list() { case "$1" in v1) echo "$REPO/results/builds/research-files.txt";; v2) echo "$REPO/results/builds/research-v2-files.txt";; v2.1) echo "$REPO/results/builds/research-v2-1-files.txt";; v2.2) echo "$REPO/results/builds/research-v2-2-files.txt";; esac; }
-build_patches() { case "$1" in v1) echo "0001 0002 0003 0004 0005";; v2) echo "0006";; v2.1) echo "0007";; v2.2) echo "0008 0009 0010 0011";; esac; }
+build_patches() { case "$1" in v1) echo "0001 0002 0003 0004 0005";; v2) echo "0006";; v2.1) echo "0007";; v2.2) echo "0008 0009 0010 0011 0012";; esac; }
 
 need_tags() {
   local t; for t in "$BASE_TAG" research-v1-v3.93.0 research-v2-v3.93.0 research-v2.1-v3.93.0; do

@@ -1,7 +1,7 @@
 From bd9fa1339487317141f378abeffc85668f42f70f Mon Sep 17 00:00:00 2001
 From: Joshua Bryan <45343084+rafe-walker@users.noreply.github.com>
 Date: Sun, 15 Nov 2026 13:22:31 -0700
-Subject: [PATCH 08/11] fix(plugin-mcp): version precondition per write, not
+Subject: [PATCH 08/12] fix(plugin-mcp): version precondition per write, not
  per user (research v2.2)
 
 Research v1 to v2.1 used, when ifUpdatedAt was left out, the version the

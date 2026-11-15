@@ -1,7 +1,7 @@
 From 265fb7f31b0712c244ea9141d92d9ee579115361 Mon Sep 17 00:00:00 2001
 From: Joshua Bryan <45343084+rafe-walker@users.noreply.github.com>
 Date: Sun, 15 Nov 2026 13:23:46 -0700
-Subject: [PATCH 09/11] fix(plugin-mcp): refuse and name unknown arguments on
+Subject: [PATCH 09/12] fix(plugin-mcp): refuse and name unknown arguments on
  every collection tool (research v2.2)
 
 The tool schemas advertise additionalProperties: false, but the MCP SDK

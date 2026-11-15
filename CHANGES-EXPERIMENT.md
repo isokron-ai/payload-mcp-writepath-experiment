@@ -1,8 +1,8 @@
 # Changes in this experiment (on top of @payloadcms/plugin-mcp 3.93.0)
 
-Eleven commits after the upstream import (tag `upstream-v3.93.0`), in four builds: research v1 (commits 1-5, tag
+Twelve commits after the upstream import (tag `upstream-v3.93.0`), in four builds: research v1 (commits 1-5, tag
 `research-v1-v3.93.0`), v2 (+ commit 6, `research-v2-v3.93.0`), v2.1 (+ commit 7, `research-v2.1-v3.93.0`) and v2.2
-(+ commits 8-11; this is `packages/plugin-mcp` on `main`, tagged `research-v2.2-v3.93.0` once merged). The same
+(+ commits 8-12; this is `packages/plugin-mcp` on `main`, tagged `research-v2.2-v3.93.0` once merged). The same
 commits are in [`patches/`](patches/) for `git am`; `harness/build/build.sh check-patches` checks that the series
 reproduces every build. Paths below are under `packages/plugin-mcp/src/`.
 
@@ -21,6 +21,7 @@ reproduces every build. Paths below are under `packages/plugin-mcp/src/`.
 | 9 | `265fb7f3` | `0009` | fix(plugin-mcp): refuse and name unknown arguments on every collection tool (research v2.2) | `mcp/helpers/strictArgs.ts` (new), `create.ts`, `delete.ts`, `find.ts`, `update.ts`; tests `unknownArguments.spec.ts` | v2.2 |
 | 10 | `85fa21ed` | `0010` | fix(plugin-mcp): pass the reason of a validation refusal through (research v2.2) | `writeSafety.ts`, `create.ts`, `delete.ts`, `update.ts`; tests `refusalReason.spec.ts` | v2.2 |
 | 11 | `8642af5a` | `0011` | fix(plugin-mcp): keep array row ids when the same rows are sent again (research v2.2) | `mcp/helpers/rowIds.ts` (new), `update.ts`, `mcp/getMcpHandler.ts`; tests `rowIds.spec.ts` | v2.2 |
+| 12 | `45c7dbb9` | `0012` | fix(plugin-mcp): review fixes for research v2.2 | `rowIds.ts`, `strictArgs.ts`, `writeSafety.ts`, `delete.ts`, `update.ts`; tests in the four spec files | v2.2 |
 
 The comments in the source use short change labels: `C-conflict`, `C-receipt`, `C-where`, `C-bulk`, `C-args`, `C-rows`,
 `C-readversion`, `C-instructions` (v1), `C-bulk-versions` (v2), and `C-version` (which replaces `C-readversion`),
@@ -36,16 +37,18 @@ a661cab2eb5446f79270791d032a06b372d23d3f7dc956c1f9bf8b47ea0b08b8  0004-feat-plug
 0baaa2ab71c0d61a6494981e83ea0809e661b361c9861f80cbb7b93297461127  0005-fix-plugin-mcp-data-argument-only-for-colliding-fiel.patch
 5237660410566e1543447285d58db6e78e17b1f9ed56ac9d2a3695b20c300db3  0006-feat-plugin-mcp-batch-friendly-preconditions-per-doc.patch
 b5fe673379540d0eff1d8d6da862de024744102495bddaac77e4beeddd95d5cb  0007-fix-plugin-mcp-read-version-memory-survives-a-find-w.patch
-cf7d56268e7031ff28ee9163ced1c8db7c5cb81955a249a4022534cac7de3e26  0008-fix-plugin-mcp-version-precondition-per-write-not-pe.patch
-d8f112398f1416e0b8c2444d542bf8668e4c2a1c5edb39cffa487e5bad298f50  0009-fix-plugin-mcp-refuse-and-name-unknown-arguments-on-.patch
-7e6425c2d58887be094aa833f69651ff0b65fb065db364dce075f03b377131af  0010-fix-plugin-mcp-pass-the-reason-of-a-validation-refus.patch
-1d6f2e121d02af8ebeff42e70cc8f142b45e3a54e93664fe84888b86d3df37e9  0011-fix-plugin-mcp-keep-array-row-ids-when-the-same-rows.patch
+53daf170a4c6aa7e72277001528ccb23bc5491ca9199ba627b184e17a7c7551c  0008-fix-plugin-mcp-version-precondition-per-write-not-pe.patch
+80818fe82a0470093a4bdfd3e68f6216c8535bb6b02d93f17f1ca0dd56f1d275  0009-fix-plugin-mcp-refuse-and-name-unknown-arguments-on-.patch
+2130eab95134f19835ff12a1a720ae312303eba32718b332a13beb166af6be29  0010-fix-plugin-mcp-pass-the-reason-of-a-validation-refus.patch
+0f0dec0585dddeccda8304a5dd34e524d9e7d53b7eef3ba42a726b9ddd0f0dbf  0011-fix-plugin-mcp-keep-array-row-ids-when-the-same-rows.patch
+07bddbcbc79a67745b440ab9984993eb665c2faf1da55fa90816bc6b3be11b30  0012-fix-plugin-mcp-review-fixes-for-research-v2.2.patch
 ```
 
-## v2.2 (commits 8 to 11): corrections
+## v2.2 (commits 8 to 12): corrections
 
 A standards run on 15 November 2026 compared the vendor build with v2.1 and found three records here broader than the
-build, and one problem the changes had introduced. v2.2 fixes all four in the code. Each fix has unit tests that fail on
+build, and one problem the changes had introduced. v2.2 fixes all four in the code (commits 8 to 11), and commit 12
+holds the fixes from a second review of those four. Each fix has unit tests that fail on
 the code before it and pass after (`harness/test/run.sh`; "Tests" below), and was checked by hand against a running
 app with v2.1 and then v2.2 swapped in (raw JSON-RPC and REST, the same app and seed as the run; "Measured"). Scripts
 and outputs: [`results/v2-2/`](results/v2-2/) (`hand-checks-v2-1.mjs` sends no versions, as clients of v2.1 did;
@@ -62,6 +65,14 @@ and outputs: [`results/v2-2/`](results/v2-2/) (`hand-checks-v2-1.mjs` sends no v
 instruction, and on task U11 they stopped batching (0 of 10 one-call deletes); v2 moved the check into the server to
 bring batching back. v2.2 keeps one-call batches possible (the version map selects the documents) and its instructions
 say to batch, but whether agents do is open until the agent series is re-run on v2.2.
+
+**Known limits of v2.2.** In a collection with drafts the check compares against the latest draft, while the find tool
+reads the published document unless asked for `draft: true`; a write sent with the published version is then refused,
+with the current version, at the cost of one more call (the argument's description says so). A bulk update reports each
+document's headline only, without the reason (Payload's bulk result keeps only the message). Unknown arguments and a
+missing `ifUpdatedAt` are refused by the MCP SDK before the tool runs, so an app's `overrideResponse` hook does not see
+those refusals. If the plugin cannot convert a collection's schema (its permissive fallback), the strict schema refuses
+every field of that collection by name; before, they were dropped.
 
 ## v2 and v2.1 (commits 6 and 7)
 
@@ -105,9 +116,10 @@ dependencies, no database). Neither the tests nor the fixture is part of a build
 | `unknownArguments.spec.ts` | 9 (`C-strict-args`) | 8 | 5 fail (update with a valid field, update alone, create, find, delete) | 8 pass |
 | `refusalReason.spec.ts` | 10 (`C-reason`) | 3 | 2 fail (update, create) | 3 pass |
 | `rowIds.spec.ts` | 11 (`C-row-ids`) | 7 | 2 fail (the repeat, an unchanged row beside a changed one); the helper's own test cannot load before the fix | 7 pass |
+| the four files, 4 more tests | 12 (review fixes) | 4 | 4 fail (no usable version and an unreadable document, no timestamps, a json field and a nested id, suggestions) | 4 pass |
 
 The tests that pass before their fix guard behaviour that must not change (a stale version already sent is refused,
-unknown keys inside array rows were already refused, an id is not given twice). On `main` all 29 pass (28 new, 1 upstream). The
+unknown keys inside array rows were already refused, an id is not given twice). On `main` all 33 pass (32 new, 1 upstream). The
 plugin source on `main` type-checks with 0 errors (strict) against Payload 3.93.0's installed types
 (`harness/test/typecheck.sh`, after `pnpm install` in `harness/app`).
 
