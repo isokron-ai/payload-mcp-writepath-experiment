@@ -3,3 +3,4 @@ harness/app/node_modules/
 harness/app/.next/
 harness/build/app-*/
 harness/build/out/
+harness/test/node_modules/

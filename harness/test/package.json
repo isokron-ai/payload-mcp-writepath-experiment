@@ -1,0 +1,17 @@
+{
+  "name": "payload-mcp-writepath-experiment-tests",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Unit tests for the research build's changes in packages/plugin-mcp (vitest; no database, no network)",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run --config vitest.config.mjs"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "json-schema-to-zod": "2.6.1",
+    "typescript": "5.7.3",
+    "vitest": "3.2.4",
+    "zod": "3.25.76"
+  }
+}
