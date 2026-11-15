@@ -148,7 +148,21 @@ export function createStore() {
   }
 
   const payload = {
-    collections: { posts: { config: { timestamps: true } }, tasks: { config: { timestamps: true } } },
+    collections: {
+      posts: {
+        config: {
+          flattenedFields: [
+            { name: 'title', type: 'text' },
+            { name: 'author', type: 'text' },
+            { name: 'items', type: 'array', flattenedFields: [{ name: 'label', type: 'text' }, { name: 'url', type: 'text' }] },
+          ],
+          timestamps: true,
+        },
+      },
+      tasks: { config: { flattenedFields: [], timestamps: true } },
+    } as Record<string, { config: { flattenedFields: unknown[]; timestamps: boolean } }>,
+    /** Test hook: when set, findByID throws for this collection (a read the user may not make, a failing hook). */
+    failReads: undefined as string | undefined,
     config: { collections: [{ slug: 'posts', flattenedFields: [] }, { slug: 'tasks', flattenedFields: [] }] },
     count: async ({ collection }: { collection: string }) => ({ totalDocs: docs[collection]!.size }),
     create: async ({ collection, data }: { collection: string; data: Record<string, unknown> }) => {
@@ -177,8 +191,14 @@ export function createStore() {
       const hit = [...docs[collection]!.values()].filter((d) => matches(d, where)).map((d) => select(d, sel))
       return { docs: hit, page: 1, totalDocs: hit.length, totalPages: 1 }
     },
-    findByID: async ({ id, collection, select: sel }: { collection: string; id: number | string; select?: Record<string, unknown> }) =>
-      select(get(collection, id), sel),
+    findByID: async ({ id, collection, select: sel }: { collection: string; id: number | string; select?: Record<string, unknown> }) => {
+      if (payload.failReads === collection) {
+        const e = new Error('You are not allowed to perform this action.')
+        e.name = 'Forbidden'
+        throw e
+      }
+      return select(get(collection, id), sel)
+    },
     logger: { error: () => {}, info: () => {}, warn: () => {} },
     update: async ({ id, collection, data, where }: { collection: string; data: Record<string, unknown>; id?: number; where?: Record<string, unknown> }) => {
       if (id !== undefined) {

@@ -55,6 +55,7 @@ export const updateResourceTool = (
     (collections?.[collectionSlug]?.overrideResponse?.(response as never, result as never, req) ||
       response) as ToolResponse
 
+  let hasDataArg = false
   const tool = async (o: {
     all: boolean
     data: Record<string, unknown>
@@ -74,12 +75,14 @@ export const updateResourceTool = (
     const versions = isVersionMap(o.ifUpdatedAt) ? o.ifUpdatedAt : undefined
     // C-bulk-versions (v2): a version map alone selects the documents it names.
     const where = o.where ?? (id === undefined && versions && Object.keys(versions).length ? JSON.stringify({ id: { in: idsOf(versions) } }) : undefined)
-    const pin = typeof o.ifUpdatedAt === 'string' ? o.ifUpdatedAt : id !== undefined ? versions?.[String(id)] : undefined
+    const checked = versionRequired(req, collectionSlug)
+    // A collection without timestamps has no version to compare: ifUpdatedAt is not checked there (only a map's ids select).
+    const pin = !checked ? undefined : typeof o.ifUpdatedAt === 'string' ? o.ifUpdatedAt : id !== undefined ? versions?.[String(id)] : undefined
     let parsedData = transformPointDataToPayload(o.data)
     parsedData = stripVirtualFields(parsedData, getCollectionVirtualFieldNames(payload.config, collectionSlug))
     const written = Object.keys(parsedData)
     if (written.length === 0) {
-      return out(errorResponse(`Error: nothing to write. Pass the fields to change (or put them under data).`))
+      return out(errorResponse(`Error: nothing to write. Pass the fields to change${hasDataArg ? ' (or put them under data)' : ''}.`))
     }
 
     if (id === undefined && !where) {
@@ -92,7 +95,6 @@ export const updateResourceTool = (
         ),
       )
     }
-    const checked = versionRequired(req, collectionSlug)
 
     let whereClause: Record<string, unknown> = {}
     if (id === undefined && where) {
@@ -123,11 +125,8 @@ export const updateResourceTool = (
             return out(staleConflict({ action: 'update', collectionSlug, current, currentDoc: await currentDocument({ collectionSlug, id, req, user }), id, readTool, sent: pin }))
           }
         } else if (checked) {
-          const currentDoc = await currentDocument({ collectionSlug, id, req, user })
-          if (currentDoc) {
-            return out(missingVersion({ action: 'update', collectionSlug, currentDoc, id, readTool }))
-          }
-          // a missing document is reported by the write itself
+          // Refused whether or not the current document can be read (a failed read must not skip the check).
+          return out(missingVersion({ action: 'update', collectionSlug, currentDoc: await currentDocument({ collectionSlug, id, req, user }), id, readTool }))
         }
         // C-row-ids (v2.2): rows re-sent unchanged without their ids keep them (stable ids on a repeated update).
         if (hasArrays(parsedData) && o.locale !== 'all') {
@@ -140,10 +139,12 @@ export const updateResourceTool = (
               overrideAccess: false,
               user,
               ...(o.locale && { locale: o.locale }),
-              ...(o.fallbackLocale && { fallbackLocale: o.fallbackLocale }),
+              // the rows stored in this locale only: a fallback locale's rows (and ids) must not be adopted
+              fallbackLocale: 'none',
             } as never)
             .catch(() => null)) as null | Record<string, unknown>
-          parsedData = keepRowIds(parsedData, stored)
+          const fields = (payload.collections?.[collectionSlug as never] as unknown as { config?: { flattenedFields?: Parameters<typeof keepRowIds>[2] } } | undefined)?.config?.flattenedFields
+          parsedData = keepRowIds(parsedData, stored, fields)
         }
         const result = await payload.update({
           id,
@@ -182,7 +183,7 @@ export const updateResourceTool = (
       if (checked && !versions) {
         return out(errorResponse('Error: a bulk update needs ifUpdatedAt as a map {"<id>": "<updatedAt>"} with the version of each document you read. Nothing was changed.'))
       }
-      const pre = await bulkPreflight({ collectionSlug, req, user, versions, where: whereClause })
+      const pre = await bulkPreflight({ collectionSlug, req, user, versions: checked ? versions : undefined, where: whereClause })
       let docs: Record<string, unknown>[] = []
       let errors: { id?: unknown; message?: string }[] = []
       if (pre.allowed.length) {
@@ -230,6 +231,7 @@ export const updateResourceTool = (
     // C-args: fields whose names collide with an operation argument are only reachable through `data`.
     const flatFields = Object.fromEntries(Object.entries(fieldShape).filter(([k]) => !OPERATION_ARGS.includes(k)))
     const colliding = Object.keys(fieldShape).filter((k) => OPERATION_ARGS.includes(k))
+    hasDataArg = colliding.length > 0
 
     // C-strict-args (v2.2): an argument the schema does not name is refused and named, never dropped.
     const name = toolName(collectionSlug, 'update')

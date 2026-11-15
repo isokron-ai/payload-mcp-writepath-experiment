@@ -181,4 +181,31 @@ describe('per-write version precondition (PAY-09)', () => {
     expect(jsonIn(w.text).currentDocument).toMatchObject({ id: task.id, owner: 'ann' })
     expect(store.read('tasks', task.id).owner).toBe('ann')
   })
+
+  it('a write without a usable version is refused even when the current document cannot be read', async () => {
+    const task = await seedTask('t')
+    const a = await connect(store)
+    store.payload.failReads = 'tasks'
+    for (const ifUpdatedAt of ['', {}, { '999': 'x' }]) {
+      const u = await a.call('updateTasks', { id: task.id, ifUpdatedAt, owner: 'mallory' })
+      expect(u.isError, JSON.stringify(ifUpdatedAt)).toBe(true)
+      const d = await a.call('deleteTasks', { id: task.id, ifUpdatedAt })
+      expect(d.isError, JSON.stringify(ifUpdatedAt)).toBe(true)
+    }
+    store.payload.failReads = undefined
+    expect(store.read('tasks', task.id).owner).toBe('ann')
+  })
+
+  it('a collection without timestamps does not check or require ifUpdatedAt', async () => {
+    const task = await seedTask('t')
+    store.payload.collections.tasks!.config.timestamps = false
+    const a = await connect(store)
+    const t = (await a.tools()).find((x) => x.name === 'updateTasks')!
+    expect(t.inputSchema.required ?? []).not.toContain('ifUpdatedAt')
+    expect((await a.call('updateTasks', { id: task.id, owner: 'b' })).isError).toBe(false)
+    expect((await a.call('updateTasks', { id: task.id, owner: 'c', ifUpdatedAt: 'anything' })).isError).toBe(false)
+    const bulk = await a.call('updateTasks', { ifUpdatedAt: { [task.id]: 'anything' }, owner: 'd' })
+    expect(bulk.isError).toBe(false)
+    expect(store.read('tasks', task.id).owner).toBe('d')
+  })
 })

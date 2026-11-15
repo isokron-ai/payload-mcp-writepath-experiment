@@ -72,7 +72,8 @@ export const deleteResourceTool = (
       )
     }
     const checked = versionRequired(req, collectionSlug)
-    const pin = typeof o.ifUpdatedAt === 'string' ? o.ifUpdatedAt : id !== undefined ? versions?.[String(id)] : undefined
+    // A collection without timestamps has no version to compare: ifUpdatedAt is not checked there (only a map's ids select).
+    const pin = !checked ? undefined : typeof o.ifUpdatedAt === 'string' ? o.ifUpdatedAt : id !== undefined ? versions?.[String(id)] : undefined
     const deleteOptions: Record<string, unknown> = {
       collection: collectionSlug,
       depth: o.depth,
@@ -111,11 +112,9 @@ export const deleteResourceTool = (
             return out(staleConflict({ action: 'delete', collectionSlug, current, currentDoc: await currentDocument({ collectionSlug, id, req, user }), id, readTool, sent: pin }))
           }
         } else if (checked) {
-          // C-version (v2.2): a delete without the version it is based on is refused.
-          const currentDoc = await currentDocument({ collectionSlug, id, req, user })
-          if (currentDoc) {
-            return out(missingVersion({ action: 'delete', collectionSlug, currentDoc, id, readTool }))
-          }
+          // C-version (v2.2): a delete without the version it is based on is refused, whether or not the current
+          // document can be read (a failed read must not skip the check).
+          return out(missingVersion({ action: 'delete', collectionSlug, currentDoc: await currentDocument({ collectionSlug, id, req, user }), id, readTool }))
         }
         const result = (await payload.delete(deleteOptions as never)) as unknown as Record<string, unknown>
         if (o.returnDocument) {
@@ -139,7 +138,7 @@ export const deleteResourceTool = (
       if (checked && !versions) {
         return out(errorResponse('Error: a bulk delete needs ifUpdatedAt as a map {"<id>": "<updatedAt>"} with the version of each document you read. Nothing was deleted.'))
       }
-      const pre = await bulkPreflight({ collectionSlug, req, user, versions, where: whereClause })
+      const pre = await bulkPreflight({ collectionSlug, req, user, versions: checked ? versions : undefined, where: whereClause })
       let docs: Record<string, unknown>[] = []
       let errors: { id?: unknown; message?: string }[] = []
       if (pre.allowed.length) {

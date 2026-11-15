@@ -98,4 +98,15 @@ describe('unknown arguments are refused and named (PAY-11)', () => {
     expect(u.isError).toBe(false)
     expect(store.read('tasks', task.id).owner).toBe('bob')
   })
+
+  it('never suggests an argument that widens a write, and gives no suggestion for very short names', async () => {
+    const task = await seedTask()
+    const a = await connect(store)
+    const r1 = await a.call('updateTasks', { id: task.id, ifUpdatedAt: task.updatedAt, al: true, owner: 'x' })
+    expect(r1.isError).toBe(true)
+    expect(r1.text).toContain('"al"')
+    expect(r1.text).not.toMatch(/did you mean "all"/)
+    const r2 = await a.call('updateTasks', { id: task.id, ifUpdatedAt: task.updatedAt, overideLock: true, owner: 'x' })
+    expect(r2.text).not.toMatch(/did you mean "overrideLock"/)
+  })
 })
