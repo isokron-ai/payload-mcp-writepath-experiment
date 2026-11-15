@@ -3,7 +3,7 @@
 > [payloadcms/payload](https://github.com/payloadcms/payload) (commit `77425c50`), with 12 commits that change how its
 > collection tools write. It is not affiliated with or endorsed by Payload and is not a supported
 > distribution. On five pre-registered editing tasks, research build v1 completed 28 of 29 runs against 11 of 29 for
-> the unmodified plugin (Claude Opus 5.5 and a capture-off observer arm). The later v2 lost another editor's change in
+> the unmodified plugin (an agent arm and a capture-off observer arm). The later v2 lost another editor's change in
 > 6 of 9 conflict runs; v2.1 fixes that and kept the other editor's change in 15 of 15 agent conflict runs while
 > keeping v2's batching, but its version check was per user, so a second client using the same key could still
 > overwrite. v2.2 checks the version per write and fixes three more items a standards run found; it has unit tests and
