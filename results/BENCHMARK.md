@@ -1,8 +1,8 @@
 # Benchmark: @payloadcms/plugin-mcp 3.93.0 vs research build v1
 
-144 measured agent runs on 13 November 2026: Claude Opus 5.5 (`claude-opus-5-5`) on both task sets, plus Claude Sonnet
-5.5 (`claude-sonnet-5-5`) on set A. Each run was one agent through the Claude Agent SDK with the MCP server's tools as
-its only tools. The harness was hashed and frozen before run 1, the sandbox was reseeded before every run, and the run
+144 measured agent runs on 13 November 2026: a frontier model ("the main model" below) on both task sets, plus a second,
+lower-priced model ("the second model") on set A. Each run was one agent through an agent SDK with the MCP server's tools
+as its only tools. The harness was hashed and frozen before run 1, the sandbox was reseeded before every run, and the run
 order was shuffled with a fixed seed and alternated between builds. Correctness comes from an independent state checker
 that reads the sandbox through Payload's REST API, never from the agent's own claim. Both builds ran on the same Payload
 3.93.0 app and the same Postgres database; only the plugin build differs.
@@ -16,9 +16,9 @@ later v2 and v2.1 builds were measured separately and much less: [BATCHING-FIX.m
 This file first gave three figures that were wrong or covered the wrong task set, and one wrong count. They are
 corrected below:
 
-- **Tokens per run.** Was "rose about 17%" (six-task Opus medians, A3 included). Now: about +18% on the five
+- **Tokens per run.** Was "rose about 17%" (six-task main-model medians, A3 included). Now: about +18% on the five
   pre-registered tasks (median 34,373 to 40,709), and the interval for the difference includes zero.
-- **Cost per run.** Was "unchanged on set A" (six tasks). Now, five pre-registered tasks, Opus: mean 0.0349 to 0.0377
+- **Cost per run.** Was "unchanged on set A" (six tasks). Now, five pre-registered tasks, main model: mean 0.0349 to 0.0377
   USD, a difference of +0.0028 with an interval of −0.0039 to 0.0110, which includes zero.
 - **Run-level test.** Was McNemar p = 0.0003 over six tasks. Now p = 0.000275 over the five pre-registered tasks. The
   per-task sign test over 5 tasks is +4/−1, p = 0.375.
@@ -42,15 +42,15 @@ reported with set B. A3 passed 6/6 on both builds, so it changes no total.
 
 | Set | Model | Vendor 3.93.0 | This build | Expected tokens per verified success |
 |---|---|---|---|---|
-| A, pre-registered (A1, A2, A4, A5, A6) | Opus + capture-off observer | 11/29 (38%) [23%, 56%] | 28/29 (97%) [83%, 99%] | 89,513 → 41,393 |
-| A, pre-registered | Opus only | 9/25 (36.0%) | 24/25 (96.0%) | |
-| A (A1 to A6, 2 runs per task) | Sonnet | 6/12 | 12/12 | |
-| B, friction-derived (U2, U6, U8, U9, U11, A3) | Opus | 11/31 (35%) | 31/31 (100%) | 109,364 → 52,230 |
+| A, pre-registered (A1, A2, A4, A5, A6) | Main model + capture-off observer | 11/29 (38%) [23%, 56%] | 28/29 (97%) [83%, 99%] | 89,513 → 41,393 |
+| A, pre-registered | Main model only | 9/25 (36.0%) | 24/25 (96.0%) | |
+| A (A1 to A6, 2 runs per task) | Second model | 6/12 | 12/12 | |
+| B, friction-derived (U2, U6, U8, U9, U11, A3) | Main model | 11/31 (35%) | 31/31 (100%) | 109,364 → 52,230 |
 
 Brackets are Wilson 95% intervals with runs pooled. Expected tokens per verified success = all tokens over every
 completed attempt ÷ verified successes.
 
-Per task, set A (Opus and observer; [BENCH-usability.md](BENCH-usability.md)):
+Per task, set A (main model and observer; [BENCH-usability.md](BENCH-usability.md)):
 
 | Task | Vendor | This build | What decided it |
 |---|---|---|---|
@@ -60,7 +60,7 @@ Per task, set A (Opus and observer; [BENCH-usability.md](BENCH-usability.md)):
 | A5 delete one person's done tasks | 6/6 | 5/6 (one provider API error) | |
 | A6 create a listing with market `de-DE` | 0/6 | 6/6 | vendor: a field named `locale` cannot be written; this build: `data` |
 
-Opus only, five pre-registered tasks ([STATS-opus-preregistered.md](STATS-opus-preregistered.md); one row per run:
+Main model only, five pre-registered tasks ([STATS-agent-preregistered.md](STATS-agent-preregistered.md); one row per run:
 [runs-setA-preregistered.csv](runs-setA-preregistered.csv)). The bootstrap resamples tasks (10,000 resamples, seed 1):
 
 | Measure | Vendor | This build | Difference [95% interval] |
@@ -75,7 +75,7 @@ Opus only, five pre-registered tasks ([STATS-opus-preregistered.md](STATS-opus-p
   catalog and instructions and from the extra calls of conflict recovery. The cost per verified success still roughly
   halved.
 
-[STATS-opus.md](STATS-opus.md) has the same statistics over six tasks with A3 included, as first reported. They are not
+[STATS-agent.md](STATS-agent.md) has the same statistics over six tasks with A3 included, as first reported. They are not
 the fair-test figures.
 
 ## Conflict recovery
@@ -110,7 +110,7 @@ run's saved capture, checker output and answer:
 
 ## Agent claims on the vendor build's failures
 
-Of the 17 graded vendor-build failures on set A (Opus and observer), the run table records 8 honest failures, 7 unclear
+Of the 17 graded vendor-build failures on set A (main model and observer), the run table records 8 honest failures, 7 unclear
 failures and 2 false "done" claims. Both false "done" claims are on A6 (`ob-a6-4`, `xb-a6-1`): the claim rule matched
 the word "finished", and both answers also told the user the market was probably not stored. They count as false
 "done" claims under the recorded rule, but the failure was not silent.
@@ -123,9 +123,9 @@ the word "finished", and both answers also told the user the market was probably
   atomic.
 - The second editor's admin-panel save is simulated as a REST PATCH of the rows she saw when she opened the post.
 - One sandbox and one Postgres for both builds; runs are sequential and every run reseeds.
-- One client (the Claude Agent SDK). Other MCP clients may present tools differently.
+- One client (an agent SDK). Other MCP clients may present tools differently.
 
 Files: [BENCH-usability.md](BENCH-usability.md) (the generated report, both sets),
-[STATS-opus-preregistered.md](STATS-opus-preregistered.md), [STATS-opus.md](STATS-opus.md) (six tasks),
-[STATS-sonnet.md](STATS-sonnet.md), [runs.csv](runs.csv) (every run), [builds/](builds/) (the measured research
+[STATS-agent-preregistered.md](STATS-agent-preregistered.md), [STATS-agent.md](STATS-agent.md) (six tasks),
+[STATS-second-model.md](STATS-second-model.md), [runs.csv](runs.csv) (every run), [builds/](builds/) (the measured research
 builds' records), [catalog/](catalog/) (tool-list weights).

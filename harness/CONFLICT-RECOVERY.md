@@ -40,7 +40,7 @@
 4. **Server instructions** (default, when the app sets none) state the write contract in six lines, so the agent
    knows to pass `ifUpdatedAt` before it ever meets a conflict.
 
-## The seeded-conflict jobs (native agent through the Claude Agent SDK, MCP tools only)
+## The seeded-conflict jobs (native agent through an agent SDK, MCP tools only)
 
 The rule: the other writer acts **after the agent's read and before its write** (seed = an `on_call`
 during hook on the read). So every seed here fires on the agent's first `findPosts`.

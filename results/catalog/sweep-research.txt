@@ -1,7 +1,7 @@
 # MCP static sweep: mcp-typescript server on vercel 0.1.0
 
 > **Model-visible** = what the model reads (`name`, `description`, `inputSchema`); **wire** = the whole tools/list entry (icons, `_meta` and `outputSchema` included), which clients do not pass to the model. Budgets apply to model-visible tokens. Every tool is counted once, as if the full catalog were loaded: not session or task exposure.
-> `cl100k`: tiktoken cl100k\_base (reference scale; not a Claude tokenizer).
+> `cl100k`: tiktoken cl100k\_base (reference scale; not the agent model's tokenizer).
 
 |  | value |
 | --- | --- |

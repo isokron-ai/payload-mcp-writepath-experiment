@@ -1,6 +1,6 @@
 # Tables, the v2.1 agent series (v1 vs v2.1)
 
-Per task and build, 5 runs each. "Plan usage estimate" is the per-run `estimated_cost_usd` the Claude Agent SDK reports, summed over the 5 runs. Per-run data: [runs-v2-1.csv](runs-v2-1.csv).
+Per task and build, 5 runs each. "Plan usage estimate" is the per-run `estimated_cost_usd` the agent SDK reports, summed over the 5 runs. Per-run data: [runs-v2-1.csv](runs-v2-1.csv).
 
 | Task | Build | Runs | Checker pass | Batching one pass | Tool calls p50 (min-max) | Write calls p50 | Tokens p50 (min-max) | Plan usage estimate, USD (estimated_cost_usd) | Runs with ifUpdatedAt | Runs whose first find used select | Other editor's change kept | Conflict classes (conflict-rules@3) |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|

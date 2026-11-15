@@ -119,13 +119,13 @@ designs, not patches ready for upstream as they stand. The dev-only experimental
 ## What it measured
 
 **Research v1 against the vendor build.** 144 measured agent runs on 13 November 2026 on a loopback Payload 3.93.0 app
-with Postgres 17.6, through the Claude Agent SDK with only the MCP server's tools. Correctness comes from a state checker
+with Postgres 17.6, through an agent SDK with only the MCP server's tools. Correctness comes from a state checker
 reading the app through REST, never from the agent. On the pre-registered task set (five jobs frozen before any change
 was designed):
 
 | | vendor 3.93.0 | research v1 |
 | --- | --- | --- |
-| Runs correct (Opus and a capture-off observer) | 11 of 29 (38%) | 28 of 29 (97%) |
+| Runs correct (main model and a capture-off observer) | 11 of 29 (38%) | 28 of 29 (97%) |
 | Expected tokens per verified success | 89,513 | 41,393 |
 | Tokens per run, median | 34,373 | 40,709 (about +18%; the interval for the difference includes zero) |
 | Seeded conflicts (another editor changes the post after the agent's read) | no conflict ever returned; the other change lost in 15 of 15 | 10 of 15 recovered, 0 persisted; the other 5 were reported honestly to the user |
@@ -145,7 +145,7 @@ write.
   signal. All six runs read the post with a narrow `select`, which hid the document from the read-version memory. v1's
   instruction to pass `ifUpdatedAt` had covered that hole; v2 removed the instruction.
 - **v2.1 fixes that hole** in the probes (E12: written 5 of 5 on v2, refused 5 of 5 on v2.1; every earlier probe
-  still holds) and with agents: Opus on v2.1 against v1, 5 runs per task, batched U11 10/10 and A5 5/5 (v1 0/10, 0/5)
+  still holds) and with agents: the main model on v2.1 against v1, 5 runs per task, batched U11 10/10 and A5 5/5 (v1 0/10, 0/5)
   and kept the other writer's change in 15 of 15 conflict-guard runs (A4, U9, U8), every first write refused by the
   server with no `ifUpdatedAt` from the agent. Calls fall (U11 8 to 4, A5 3 to 2); tokens per run do not.
 

@@ -8,7 +8,7 @@ patch [`0007`](../patches/0007-fix-plugin-mcp-read-version-memory-survives-a-fin
 
 **Where each build stands:**
 
-- **v2 restored batching, and it is not safe.** Opus batched every opportunity it met, but in **6 of 9 conflict-guard
+- **v2 restored batching, and it is not safe.** The agent batched every opportunity it met, but in **6 of 9 conflict-guard
   runs v2 lost the other writer's change** with no signal. Do not use v2.
 - **v2.1 keeps v2's batching and holds the other writer's change, in probes and in agent runs.** It closes the hole v2
   opened in the scripted probes (5 of 5), every earlier probe still holds, and in its own agent series (section 10,
@@ -17,7 +17,7 @@ patch [`0007`](../patches/0007-fix-plugin-mcp-read-version-memory-survives-a-fin
 
 ## 1. The regression in v1
 
-On the friction-derived task U11 (delete 3 scratch tasks and 3 `TMP-` listings), Opus handled the batch opportunities in
+On the friction-derived task U11 (delete 3 scratch tasks and 3 `TMP-` listings), the agent handled the batch opportunities in
 one call 8 of 10 times on the vendor build and **0 of 10** on research v1, with 10 calls per run instead of 4. The likely
 cause, recorded at the time as an inference, was v1's own default server instruction:
 
@@ -66,13 +66,13 @@ measured v2 files byte-identical ([builds/research-v2-files.txt](builds/research
 ## 3. Method
 
 Two frozen series on the same sandbox as the main benchmark (one Postgres, every run reseeded), the same checkers
-(`harness/harness/check.mjs`), and the same client: the Claude Agent SDK with only the MCP server's tools.
+(`harness/harness/check.mjs`), and the same client: an agent SDK with only the MCP server's tools.
 
 | Series | Frozen | What |
 |---|---|---|
-| batching series | 13 Nov 2026, 19:07 UTC | 10 probe runs, then Claude Opus 5.5 (`claude-opus-5-5`), 5 runs per task per build on U11, A5, A3 (batching) and A4, U9 (conflict guards), research v2 against research v1 as a same-day control, order shuffled with a fixed seed |
+| batching series | 13 Nov 2026, 19:07 UTC | 10 probe runs, then the main model of the benchmark (a frontier model), 5 runs per task per build on U11, A5, A3 (batching) and A4, U9 (conflict guards), research v2 against research v1 as a same-day control, order shuffled with a fixed seed |
 | v2.1 probes | 13 Nov 2026, 19:34 UTC | probes only, no model (section 6) |
-| v2.1 agent series | 13 Nov 2026, 21:18 UTC | Claude Opus 5.5, 5 runs per task per build on U11, A5, A3 (batching) and A4, U9, U8 (conflict guards), research v2.1 against research v1 as a same-day control, order shuffled with a fixed seed, plan and expected results written before any run (section 10) |
+| v2.1 agent series | 13 Nov 2026, 21:18 UTC | the same model, 5 runs per task per build on U11, A5, A3 (batching) and A4, U9, U8 (conflict guards), research v2.1 against research v1 as a same-day control, order shuffled with a fixed seed, plan and expected results written before any run (section 10) |
 
 - **Prompt check** before the freeze ([batching/prompt-check.md](batching/prompt-check.md)): the five prompt files are
   unchanged since the main benchmark, match their pre-registered texts, and contain no word that steers towards or away
@@ -100,7 +100,7 @@ Two frozen series on the same sandbox as the main benchmark (one Postgres, every
 | E10 (contrast) | v1 | reproduced | stale task written 4/4 valid (one repetition lost to a client connection reset) |
 | E11 version map pins one wrong version | v2 | not reproduced (holds) | pinned task kept 5/5, other four deleted 5/5, `isError`, "stale", `best_effort` 5/5; control (no map) deleted all five |
 
-### 4.2 Agent runs: v1 against v2 (Opus)
+### 4.2 Agent runs: v1 against v2
 
 The series stopped at 40 of 50 planned runs (section 7). Runs per cell are shown; the run refused by the provider is
 left out.
@@ -153,7 +153,7 @@ with a narrow `select`.
 
 Per-run cost in USD is in [batching/runs.csv](batching/runs.csv) (`usd`). The probes cost nothing (no model). For the
 v2.1 agent series, the per-run figure is `estimated_cost_usd` in [batching/runs-v2-1.csv](batching/runs-v2-1.csv): a
-plan usage estimate reported by the Claude Agent SDK (4.0051 USD over the 60 runs).
+plan usage estimate reported by the agent SDK (4.0051 USD over the 60 runs).
 
 ## 6. Research v2.1: the select fix (probes only)
 
@@ -196,7 +196,7 @@ finishing the v2 cells would measure a build that is not proposed, and the v1 co
 
 ## 8. Verdict
 
-- **Batching: fixed.** With v2's instructions and per-document bulk checks, Opus batched every opportunity it met
+- **Batching: fixed.** With v2's instructions and per-document bulk checks, the agent batched every opportunity it met
   (U11 8/8, A5 5/5, A3 3/3) against v1's 0/4, 0/4, 5/5 the same day, at 2-4 calls per run instead of 3-10. The
   per-document check inside bulk calls holds (E9-E11), and it closed a lost update that v1's bulk calls had (E9 and E10
   reproduced on v1).
@@ -226,7 +226,7 @@ finishing the v2 cells would measure a build that is not proposed, and the v1 co
 ## 10. Research v2.1 with agents (v1 against v2.1)
 
 Frozen 13 Nov 2026, 21:18 UTC, on the same sandbox, checkers, system prompt and task prompts as the batching series.
-Claude Opus 5.5 (`claude-opus-5-5`), 5 runs per task per build, research v2.1 against research v1 as a same-day
+The benchmark's main model (a frontier model), 5 runs per task per build, research v2.1 against research v1 as a same-day
 control, order shuffled with a fixed seed. Research v2 is not run. U8 is added: the other editor saves and keeps the
 post open (her lock). The plan, including the expected results, was written and frozen before any run. Prompt check:
 [batching/prompt-check-v2-1.md](batching/prompt-check-v2-1.md) (no steering words). **60 of 60 runs completed**, all

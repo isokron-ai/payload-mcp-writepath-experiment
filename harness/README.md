@@ -88,7 +88,7 @@ One run of a task, by hand or with any MCP client:
    <file>`. Exit 0 is pass. The agent's claim never decides pass or fail. Conflict tasks also read `<dir>/calls.jsonl`
    (the client's call log, one JSON object per tool call) to classify recovery.
 
-The measured runs used the Claude Agent SDK with the MCP server's tools as the agent's only tools, through IsoKron's
+The measured runs used an agent SDK with the MCP server's tools as the agent's only tools, through IsoKron's
 internal driver. The driver ran `setup.mjs` before each run, fired `during.mjs` on the agent's first `findPosts`,
 recorded `calls.jsonl` and ran `check.mjs`, exactly the steps above.
 
