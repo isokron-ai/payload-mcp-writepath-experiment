@@ -1,0 +1,978 @@
+From bd9fa1339487317141f378abeffc85668f42f70f Mon Sep 17 00:00:00 2001
+From: Joshua Bryan <45343084+rafe-walker@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 13:22:31 -0700
+Subject: [PATCH 08/11] fix(plugin-mcp): version precondition per write, not
+ per user (research v2.2)
+
+Research v1 to v2.1 used, when ifUpdatedAt was left out, the version the
+server remembered for the user. Two MCP clients sharing one key are the same
+user, so one client's read or write refreshed the other's remembered version
+and the other's stale write went through.
+
+Every update and delete now carries the version its change is based on:
+ifUpdatedAt is required in the advertised schema (a string with id, a map
+{"<id>": "<updatedAt>"} for several documents). A document whose updatedAt is
+no longer the one sent is refused with its current state, whoever changed it.
+In a bulk call, a document the where matches but the map does not name is
+refused as "no_version". The per-user memory is gone. Find keeps updatedAt in
+its answer under any select, so the caller always has the version to send;
+receipts already carry it. The default instructions say so. Collections with
+timestamps off keep ifUpdatedAt optional and unchecked.
+
+Tests: versionPrecondition.spec.ts (10), with an in-memory Payload stand-in
+and a real MCP server and client (fakePayload.spec-utils.ts).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ packages/plugin-mcp/src/mcp/getMcpHandler.ts  |   4 +-
+ .../plugin-mcp/src/mcp/helpers/writeSafety.ts | 176 ++++++-------
+ .../src/mcp/tools/resource/create.ts          |   3 +-
+ .../src/mcp/tools/resource/delete.ts          |  30 ++-
+ .../tools/resource/fakePayload.spec-utils.ts  | 239 ++++++++++++++++++
+ .../plugin-mcp/src/mcp/tools/resource/find.ts |  11 +-
+ .../src/mcp/tools/resource/update.ts          |  36 ++-
+ .../resource/versionPrecondition.spec.ts      | 184 ++++++++++++++
+ 8 files changed, 544 insertions(+), 139 deletions(-)
+ create mode 100644 packages/plugin-mcp/src/mcp/tools/resource/fakePayload.spec-utils.ts
+ create mode 100644 packages/plugin-mcp/src/mcp/tools/resource/versionPrecondition.spec.ts
+
+diff --git a/packages/plugin-mcp/src/mcp/getMcpHandler.ts b/packages/plugin-mcp/src/mcp/getMcpHandler.ts
+index 2a5c1ae..0b7c3fc 100644
+--- a/packages/plugin-mcp/src/mcp/getMcpHandler.ts
++++ b/packages/plugin-mcp/src/mcp/getMcpHandler.ts
+@@ -533,8 +533,8 @@ export const getMcpHandler = (
+           serverOptions.instructions ??
+           [
+             'Payload CMS content tools. Writes are partial: send only the fields you change.',
+-            'Several documents getting the same change or deletion: use ONE update/delete call with where (e.g. {"id":{"in":[1,2,3]}}), not one call per document.',
+-            'Every update/delete, bulk included, is checked per document against the version you last read; a "Conflict" means that document was NOT written: re-apply only your change to the current version it carries, retry. Pass ifUpdatedAt only to pin a specific version (a string with id; {"<id>":"<updatedAt>"} with where).',
++            'Several documents getting the same change or deletion: use ONE update/delete call whose ifUpdatedAt map names them (e.g. {"1":"<updatedAt>","2":"<updatedAt>"}), not one call per document.',
++            'Every update/delete carries ifUpdatedAt: the updatedAt of the version your change is based on (find answers and write receipts carry it; a string with id, a map {"<id>":"<updatedAt>"} for several). A "Conflict" means that document changed since then and was NOT written: re-apply only your change to the current version it carries, retry with its updatedAt.',
+             'Documents another user has open are locked: you get a Conflict naming them; do not pass overrideLock unless the user asked to take over.',
+             'Array rows carry an id: keep the ids of rows you keep, so their other-locale values survive; rows without an id are new.',
+             'Bulk writes are best-effort and report per document; "PARTIAL" means some were refused or failed and NOT changed while the rest were applied. An empty where is refused unless all: true.',
+diff --git a/packages/plugin-mcp/src/mcp/helpers/writeSafety.ts b/packages/plugin-mcp/src/mcp/helpers/writeSafety.ts
+index 90ec77b..ef2f542 100644
+--- a/packages/plugin-mcp/src/mcp/helpers/writeSafety.ts
++++ b/packages/plugin-mcp/src/mcp/helpers/writeSafety.ts
+@@ -1,5 +1,7 @@
+ import type { PayloadRequest, TypedUser } from 'payload'
+ 
++import { z } from 'zod'
++
+ /**
+  * Write-safety helpers for the collection tools (IsoKron research build, isokron-payload-mcp-2026-11).
+  *
+@@ -179,50 +181,58 @@ export const OPERATION_ARGS = [
+ ]
+ 
+ /**
+- * C-readversion: the version each user last read, per document (and per document incarnation: createdAt, so a
+- * re-created document with the same id starts clean). An update or delete by id with no ifUpdatedAt uses it as the
+- * precondition: if the document changed since this user last read or wrote it, the write is refused as stale.
+- * In-process memory only (the MCP transport is stateless); best-effort, like ifUpdatedAt.
++ * C-version (research v2.2, PAY-09): the version precondition is per write. Every update and delete carries the version
++ * its change is based on (ifUpdatedAt: the document's updatedAt as the caller read it, or as its last write receipt
++ * gave it). A write whose version is no longer current is refused, whoever sends it: another user, another client, or
++ * another session using the same key. Research v1 to v2.1 used the version the server remembered per user when
++ * ifUpdatedAt was left out; two clients sharing one key refreshed each other's memory, so a stale write went through.
++ * Collections without timestamps have no version to send; their writes are not checked. Best-effort: the check reads
++ * the document, then writes, so a change landing between the two is not detected.
+  */
+-const lastSeen = new Map<string, string>()
+-const seenKey = (userId: unknown, collectionSlug: string, id: unknown, createdAt: unknown) =>
+-  `${String(userId)}|${collectionSlug}|${String(id)}|${String(createdAt)}`
+-
+-export function rememberRead(user: TypedUser | undefined, collectionSlug: string, docs: unknown[]): void {
+-  if (!user) {
+-    return
+-  }
+-  for (const d of docs) {
+-    const doc = d as { createdAt?: string; id?: unknown; updatedAt?: string }
+-    if (doc && doc.id !== undefined && doc.updatedAt) {
+-      lastSeen.set(seenKey(user.id, collectionSlug, doc.id, doc.createdAt), doc.updatedAt)
+-    }
+-  }
+-}
++export const versionRequired = (req: PayloadRequest, collectionSlug: string): boolean =>
++  (req.payload.collections?.[collectionSlug as never] as { config?: { timestamps?: boolean } } | undefined)?.config
++    ?.timestamps !== false
+ 
+-export async function readVersionCheck(args: {
++/** A write by id that carries no version: refused, with the current document so the change can be re-applied to it. */
++export function missingVersion(args: {
++  action: 'delete' | 'update'
+   collectionSlug: string
++  currentDoc: null | Record<string, unknown>
+   id: number | string
+-  req: PayloadRequest
+-  user: TypedUser
+-}): Promise<{ current: null | string; seen: string } | null> {
+-  try {
+-    const doc = (await args.req.payload.findByID({
+-      id: args.id,
+-      collection: args.collectionSlug,
+-      depth: 0,
+-      draft: true,
+-      overrideAccess: false,
+-      user: args.user,
+-    })) as { createdAt?: string; updatedAt?: string }
+-    const seen = lastSeen.get(seenKey(args.user?.id, args.collectionSlug, args.id, doc?.createdAt))
+-    if (seen && doc?.updatedAt && seen !== doc.updatedAt) {
+-      return { current: doc.updatedAt, seen }
+-    }
+-  } catch {
+-    // a missing document is reported by the write itself
+-  }
+-  return null
++  readTool: string
++}): ToolResponse {
++  const { action, collectionSlug, currentDoc, id, readTool } = args
++  const current = (currentDoc?.updatedAt as string | undefined) ?? null
++  const structured = { conflict: 'no_version', collection: collectionSlug, id, documentUpdatedAt: current, applied: false, currentDocument: currentDoc }
++  return errorResponse(
++    `Refused: ${action === 'delete' ? 'a delete' : 'an update'} needs ifUpdatedAt, the updatedAt of the version your change is based on ` +
++      `(${readTool} answers carry it, and so does the receipt of your last write). Your ${action} was NOT applied. ` +
++      `The current document is below (currentDocument): ${action === 'delete' ? 'check it' : 're-apply only your own change to it'} ` +
++      `and retry with ifUpdatedAt ${current ?? '<its updatedAt>'}.\n` +
++      JSON.stringify(structured),
++  )
++}
++
++/**
++ * The ifUpdatedAt argument of update and delete. Required (in the advertised schema too) when the collection has
++ * versions; the message of a call without it names the argument and says what to send.
++ */
++export function versionArg(versioned: boolean, action: 'delete' | 'update') {
++  const verb = action === 'delete' ? 'deleted' : 'written'
++  const arg = z
++    .union([z.string(), z.record(z.string(), z.string())], {
++      required_error:
++        `Nothing was ${action === 'delete' ? 'deleted' : 'changed'}: send the updatedAt of the version your ${action} is based on ` +
++        `(find answers and write receipts carry it; a map {"<id>": "<updatedAt>"} for several documents); it is required`,
++    })
++    .describe(
++      `Required: the version your ${action} is based on (updatedAt, from a find answer or your last write receipt). With id: that updatedAt string. ` +
++        `For several documents: a map {"<id>": "<updatedAt>"} (it selects those ids; with where, every match must be in it). ` +
++        `A document changed since that version is not ${verb}, whoever changed it; you get its current version`,
++    )
++  return versioned
++    ? arg
++    : arg.optional().describe('This collection keeps no versions (timestamps are off), so writes cannot be checked; leave it out')
+ }
+ 
+ /** ifUpdatedAt as a per-document version map (bulk calls): {"<id>": "<updatedAt>"}. */
+@@ -236,20 +246,20 @@ export const idsOf = (versions: VersionMap): Array<number | string> =>
+   Object.keys(versions).map((k) => (/^\d+$/.test(k) ? Number(k) : k))
+ 
+ export type BulkRefusal = {
+-  conflict: 'stale'
++  conflict: 'no_version' | 'stale'
+   currentDocument: null | Record<string, unknown>
+   documentUpdatedAt: null | string
+   id: unknown
+-  ifUpdatedAt: string
++  ifUpdatedAt: null | string
+   ok: false
+-  precondition: 'ifUpdatedAt' | 'last_read'
+ }
+ 
+ /**
+- * C-bulk-versions (research v2): per-document preconditions for a where-based update or delete. Every matching
+- * document is checked against the version pinned for it in `versions` (ifUpdatedAt map) or, when none is pinned,
+- * against the version this user last read (C-readversion), exactly as a write by id is. Documents that changed are
+- * refused (with their current state); the rest may be written. Best-effort (read, then write), like the by-id check.
++ * C-bulk-versions (research v2; per write since v2.2): per-document preconditions for a where-based update or delete.
++ * Every matching document is checked against the version the caller pinned for it in `versions` (the ifUpdatedAt
++ * map). A document that changed since that version is refused as "stale", and one the map does not name is refused as
++ * "no_version" (both with their current state); the rest may be written. Without a map (`versions` undefined, only for a
++ * collection that keeps no versions) nothing is checked.
+  */
+ export async function bulkPreflight(args: {
+   collectionSlug: string
+@@ -267,22 +277,16 @@ export async function bulkPreflight(args: {
+     pagination: false,
+     user,
+     where: where as never,
+-  })) as unknown as { docs: Array<Record<string, unknown> & { createdAt?: string; id: number | string; updatedAt?: string }> }
++  })) as unknown as { docs: Array<Record<string, unknown> & { id: number | string; updatedAt?: string }> }
+   const allowed: Array<number | string> = []
+   const refused: BulkRefusal[] = []
+   for (const doc of docs) {
+     const pinned = versions?.[String(doc.id)]
+-    const expected = pinned ?? lastSeen.get(seenKey(user?.id, collectionSlug, doc.id, doc.createdAt))
+-    if (expected && doc.updatedAt && expected !== doc.updatedAt) {
+-      refused.push({
+-        id: doc.id,
+-        conflict: 'stale',
+-        currentDocument: doc,
+-        documentUpdatedAt: doc.updatedAt,
+-        ifUpdatedAt: expected,
+-        ok: false,
+-        precondition: pinned ? 'ifUpdatedAt' : 'last_read',
+-      })
++    const now = doc.updatedAt ?? null
++    if (versions && pinned === undefined) {
++      refused.push({ id: doc.id, conflict: 'no_version', currentDocument: doc, documentUpdatedAt: now, ifUpdatedAt: null, ok: false })
++    } else if (pinned !== undefined && now && pinned !== now) {
++      refused.push({ id: doc.id, conflict: 'stale', currentDocument: doc, documentUpdatedAt: now, ifUpdatedAt: pinned, ok: false })
+     } else {
+       allowed.push(doc.id)
+     }
+@@ -319,11 +323,17 @@ export function bulkAnswer(args: {
+     action === 'deleted'
+       ? `check them; if they should still be deleted, retry those ids in one call with ifUpdatedAt ${JSON.stringify(pins)}`
+       : `re-apply only your change to those ids and retry them in one call with ifUpdatedAt ${JSON.stringify(pins)}`
+-  const staleText = refused.length
+-    ? `${refused.length} changed since you read them (conflict "stale"; currentDocument shows each one now): ${next}, or re-read them with ${readTool}`
++  const stale = refused.filter((r) => r.conflict === 'stale').length
++  const noVersion = refused.length - stale
++  const staleText = stale
++    ? `${stale} changed since you read them (conflict "stale"; currentDocument shows each one now)`
++    : ''
++  const noVersionText = noVersion
++    ? `${noVersion} matched your where but had no version in ifUpdatedAt (conflict "no_version"; currentDocument shows each one now)`
+     : ''
++  const retryText = refused.length ? `for those: ${next}, or re-read them with ${readTool}` : ''
+   const errText = errors.length ? `${errors.length} failed (see error)` : ''
+-  const why = [staleText, errText].filter(Boolean).join('; ')
++  const why = [staleText, noVersionText, retryText, errText].filter(Boolean).join('; ')
+   let head: string
+   if (notChanged === 0) {
+     head = `${action === 'deleted' ? 'Deleted' : 'Updated'} ${applied.length} document(s) ${action === 'deleted' ? 'from' : 'in'} "${collectionSlug}".`
+@@ -344,42 +354,20 @@ export function bulkAnswer(args: {
+ }
+ 
+ /**
+- * C-readversion with select (research v2.1): the read-version memory needs each document's updatedAt and createdAt.
+- * A find with an inclusion select that leaves them out (e.g. {title, items, updatedAt}) used to record nothing usable,
+- * so the next write by that user had no precondition. The query asks for both; the answer is unchanged (the fields
+- * the agent did not ask for are removed again before the document is shown).
++ * C-version with select (research v2.1; v2.2): a find with an inclusion select that leaves out updatedAt (e.g.
++ * {title, items}) would give the caller no version to send with its next write. The query always asks for updatedAt,
++ * and the answer keeps it (v2.1 removed it again; with a per-write precondition the caller needs it).
+  */
+-const VERSION_FIELDS = ['createdAt', 'updatedAt']
+-
+-export function versionSelect(select?: Record<string, unknown>): { added: string[]; select?: Record<string, unknown> } {
++export function versionSelect(select?: Record<string, unknown>): Record<string, unknown> | undefined {
+   if (!select || typeof select !== 'object' || Object.keys(select).length === 0) {
+-    return { added: [], select }
++    return select
+   }
+   const inclusion = Object.values(select).some((v) => v !== false)
+   const out: Record<string, unknown> = { ...select }
+-  const added: string[] = []
+-  for (const f of VERSION_FIELDS) {
+-    if (inclusion && out[f] !== true) {
+-      out[f] = true
+-      added.push(f)
+-    } else if (!inclusion && out[f] === false) {
+-      delete out[f]
+-      added.push(f)
+-    }
+-  }
+-  return { added, select: out }
+-}
+-
+-export function stripAdded<T>(docs: T[], added: string[]): T[] {
+-  if (!added.length) {
+-    return docs
+-  }
+-  for (const d of docs) {
+-    if (d && typeof d === 'object') {
+-      for (const f of added) {
+-        delete (d as Record<string, unknown>)[f]
+-      }
+-    }
++  if (inclusion) {
++    out.updatedAt = true
++  } else if (out.updatedAt === false) {
++    delete out.updatedAt
+   }
+-  return docs
++  return out
+ }
+diff --git a/packages/plugin-mcp/src/mcp/tools/resource/create.ts b/packages/plugin-mcp/src/mcp/tools/resource/create.ts
+index 96f1420..95ef8fc 100644
+--- a/packages/plugin-mcp/src/mcp/tools/resource/create.ts
++++ b/packages/plugin-mcp/src/mcp/tools/resource/create.ts
+@@ -13,7 +13,7 @@ import {
+ } from '../../../utils/getVirtualFieldNames.js'
+ import { convertCollectionSchemaToZod } from '../../../utils/schemaConversion/convertCollectionSchemaToZod.js'
+ import { transformPointDataToPayload } from '../../../utils/transformPointDataToPayload.js'
+-import { errorResponse, OPERATION_ARGS, receipt, rememberRead } from '../../helpers/writeSafety.js'
++import { errorResponse, OPERATION_ARGS, receipt } from '../../helpers/writeSafety.js'
+ import { toolSchemas } from '../schemas.js'
+ export const createResourceTool = (
+   server: McpServer,
+@@ -88,7 +88,6 @@ export const createResourceTool = (
+         )
+       }
+ 
+-      rememberRead(user, collectionSlug, [result])
+       const response = !returnDocument && !select
+         ? receipt({ action: 'created', collectionSlug, doc: result as unknown as Record<string, unknown>, written: Object.keys(parsedData) })
+         : {
+diff --git a/packages/plugin-mcp/src/mcp/tools/resource/delete.ts b/packages/plugin-mcp/src/mcp/tools/resource/delete.ts
+index f640d60..6a41a3a 100644
+--- a/packages/plugin-mcp/src/mcp/tools/resource/delete.ts
++++ b/packages/plugin-mcp/src/mcp/tools/resource/delete.ts
+@@ -17,11 +17,13 @@ import {
+   isVersionMap,
+   lockConflict,
+   lockInfo,
+-  readVersionCheck,
++  missingVersion,
+   receipt,
+   staleConflict,
+   type ToolResponse,
+   type VersionMap,
++  versionArg,
++  versionRequired,
+ } from '../../helpers/writeSafety.js'
+ import { toolSchemas } from '../schemas.js'
+ 
+@@ -63,10 +65,11 @@ export const deleteResourceTool = (
+     if (id === undefined && typeof o.ifUpdatedAt === 'string') {
+       return out(
+         errorResponse(
+-          'Error: ifUpdatedAt as a single value pins one document (use it with id). For a bulk call pass a map {"<id>": "<updatedAt>"}, or leave it out: each document is checked against the version you last read. Nothing was deleted.',
++          'Error: ifUpdatedAt as a single value is the version of one document (use it with id). For a bulk call pass a map {"<id>": "<updatedAt>"} with the version of each document you read. Nothing was deleted.',
+         ),
+       )
+     }
++    const checked = versionRequired(req, collectionSlug)
+     const pin = typeof o.ifUpdatedAt === 'string' ? o.ifUpdatedAt : id !== undefined ? versions?.[String(id)] : undefined
+     const deleteOptions: Record<string, unknown> = {
+       collection: collectionSlug,
+@@ -105,10 +108,11 @@ export const deleteResourceTool = (
+           if (current !== pin) {
+             return out(staleConflict({ action: 'delete', collectionSlug, current, currentDoc: await currentDocument({ collectionSlug, id, req, user }), id, readTool, sent: pin }))
+           }
+-        } else {
+-          const stale = await readVersionCheck({ collectionSlug, id, req, user })
+-          if (stale) {
+-            return out(staleConflict({ action: 'delete', collectionSlug, current: stale.current, currentDoc: await currentDocument({ collectionSlug, id, req, user }), id, readTool, sent: stale.seen }))
++        } else if (checked) {
++          // C-version (v2.2): a delete without the version it is based on is refused.
++          const currentDoc = await currentDocument({ collectionSlug, id, req, user })
++          if (currentDoc) {
++            return out(missingVersion({ action: 'delete', collectionSlug, currentDoc, id, readTool }))
+           }
+         }
+         const result = (await payload.delete(deleteOptions as never)) as unknown as Record<string, unknown>
+@@ -127,9 +131,12 @@ export const deleteResourceTool = (
+         }
+         return out(receipt({ action: 'deleted', collectionSlug, doc: result }), result)
+       }
+-      // Bulk (v2): every matching document is checked against its pinned or last-read version first; the stale ones
+-      // are refused with their current state, the rest are deleted (best-effort, per document).
++      // Bulk (v2; v2.2): every matching document is checked against the version pinned for it in the ifUpdatedAt map
++      // first; stale and unnamed ones are refused with their current state, the rest are deleted (best-effort).
+       const whereClause = deleteOptions.where as Record<string, unknown>
++      if (checked && !versions) {
++        return out(errorResponse('Error: a bulk delete needs ifUpdatedAt as a map {"<id>": "<updatedAt>"} with the version of each document you read. Nothing was deleted.'))
++      }
+       const pre = await bulkPreflight({ collectionSlug, req, user, versions, where: whereClause })
+       let docs: Record<string, unknown>[] = []
+       let errors: { id?: unknown; message?: string }[] = []
+@@ -166,12 +173,7 @@ export const deleteResourceTool = (
+     const deleteSchema = z.object({
+       ...toolSchemas.deleteResource.parameters.shape,
+       all: z.boolean().optional().default(false).describe('Required to delete every document with an empty where clause'),
+-      ifUpdatedAt: z
+-        .union([z.string(), z.record(z.string(), z.string())])
+-        .optional()
+-        .describe(
+-          'Optional pin; without it each document is checked against the version you last read. With id: the updatedAt string. With where: a map {"<id>": "<updatedAt>"}. A changed document is not deleted',
+-        ),
++      ifUpdatedAt: versionArg(versionRequired(req, collectionSlug), 'delete'),
+       overrideLock: z
+         .boolean()
+         .optional()
+diff --git a/packages/plugin-mcp/src/mcp/tools/resource/fakePayload.spec-utils.ts b/packages/plugin-mcp/src/mcp/tools/resource/fakePayload.spec-utils.ts
+new file mode 100644
+index 0000000..fd0dd98
+--- /dev/null
++++ b/packages/plugin-mcp/src/mcp/tools/resource/fakePayload.spec-utils.ts
+@@ -0,0 +1,239 @@
++/**
++ * Test fixture for the resource tool specs (IsoKron research build): an in-memory stand-in for the parts of
++ * Payload's Local API the collection tools call, two collections shaped like the experiment's sandbox app (tasks,
++ * posts), and a real MCP server and client over the SDK's in-memory transport, so input validation, `isError` and
++ * tools/list go through the SDK exactly as they do in the app. Not part of the plugin build (build.sh skips
++ * *.spec.ts and *.spec-utils.ts).
++ */
++import type { JSONSchema4 } from 'json-schema'
++import type { PayloadRequest, TypedUser } from 'payload'
++
++import { Client } from '@modelcontextprotocol/sdk/client/index.js'
++import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
++import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
++
++import { createResourceTool } from './create.js'
++import { deleteResourceTool } from './delete.js'
++import { findResourceTool } from './find.js'
++import { updateResourceTool } from './update.js'
++
++type Doc = Record<string, unknown> & { createdAt: string; id: number; updatedAt: string }
++
++export const schemas: Record<string, JSONSchema4> = {
++  tasks: {
++    type: 'object',
++    additionalProperties: false,
++    properties: {
++      id: { type: 'integer' },
++      title: { type: 'string' },
++      status: { type: ['string', 'null'], enum: ['todo', 'doing', 'done', null] },
++      owner: { type: ['string', 'null'] },
++      priority: { type: ['number', 'null'] },
++      archived: { type: ['boolean', 'null'] },
++      updatedAt: { type: 'string' },
++      createdAt: { type: 'string' },
++    },
++    required: ['id', 'title', 'updatedAt', 'createdAt'],
++  },
++  posts: {
++    type: 'object',
++    additionalProperties: false,
++    properties: {
++      id: { type: 'integer' },
++      title: { type: 'string' },
++      author: { type: ['string', 'null'] },
++      items: {
++        type: ['array', 'null'],
++        items: {
++          type: 'object',
++          additionalProperties: false,
++          properties: { id: { type: ['string', 'null'] }, label: { type: 'string' }, url: { type: ['string', 'null'] } },
++          required: ['label'],
++        },
++      },
++      updatedAt: { type: 'string' },
++      createdAt: { type: 'string' },
++    },
++    required: ['id', 'title', 'updatedAt', 'createdAt'],
++  },
++}
++
++/** Payload's ValidationError as the Local API throws it (message, plus the reasons in data.errors). */
++class FakeValidationError extends Error {
++  data: { errors: Array<{ label: string; message: string; path: string }> }
++  status = 400
++  constructor(errors: Array<{ label: string; message: string; path: string }>) {
++    super(`The following field is invalid: ${errors.map((e) => e.label).join(', ')}`)
++    this.name = 'ValidationError'
++    this.data = { errors }
++  }
++}
++
++const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T
++
++export function createStore() {
++  const docs: Record<string, Map<number, Doc>> = { posts: new Map(), tasks: new Map() }
++  let nextId = 1
++  let rowSeq = 0
++  let clock = Date.parse('2026-11-15T12:00:00.000Z')
++  const tick = () => new Date((clock += 1000)).toISOString()
++  const rowId = () => `row${String(++rowSeq).padStart(4, '0')}`
++
++  // Payload keeps the id of an array row sent with one and gives every row sent without one a new id.
++  const withRowIds = (data: Record<string, unknown>) => {
++    const out = { ...data }
++    for (const [k, v] of Object.entries(out)) {
++      if (Array.isArray(v)) {
++        out[k] = v.map((row) =>
++          row && typeof row === 'object' ? { ...(row as object), id: (row as { id?: unknown }).id ?? rowId() } : row,
++        )
++      }
++    }
++    return out
++  }
++  const validate = (collection: string, data: Record<string, unknown>) => {
++    if (collection === 'tasks' && typeof data.priority === 'number' && data.priority > 5) {
++      throw new FakeValidationError([
++        { label: 'Priority', message: `${data.priority} is greater than the max allowed Value of 5.`, path: 'priority' },
++      ])
++    }
++  }
++  const matches = (doc: Doc, where: Record<string, unknown> | undefined): boolean => {
++    if (!where || Object.keys(where).length === 0) {
++      return true
++    }
++    return Object.entries(where).every(([k, cond]) => {
++      if (k === 'and') {
++        return (cond as Record<string, unknown>[]).every((w) => matches(doc, w))
++      }
++      const c = cond as { equals?: unknown; in?: unknown[] }
++      const v = doc[k]
++      if ('equals' in c) {
++        return String(v) === String(c.equals)
++      }
++      if (Array.isArray(c.in)) {
++        return c.in.map(String).includes(String(v))
++      }
++      return false
++    })
++  }
++  const select = (doc: Doc, sel?: Record<string, unknown>) => {
++    if (!sel || Object.keys(sel).length === 0) {
++      return clone(doc)
++    }
++    const inclusion = Object.values(sel).some((v) => v !== false)
++    const out: Record<string, unknown> = {}
++    for (const [k, v] of Object.entries(doc)) {
++      if (k === 'id' || (inclusion ? sel[k] === true : sel[k] !== false)) {
++        out[k] = clone(v)
++      }
++    }
++    return out
++  }
++  const get = (collection: string, id: number | string) => {
++    const d = docs[collection]!.get(Number(id))
++    if (!d) {
++      const e = new Error('Not Found')
++      e.name = 'NotFound'
++      throw e
++    }
++    return d
++  }
++  const updateOne = (collection: string, id: number, data: Record<string, unknown>) => {
++    const d = get(collection, id)
++    validate(collection, data)
++    const next = { ...d, ...withRowIds(data), updatedAt: tick() } as Doc
++    docs[collection]!.set(id, next)
++    return clone(next)
++  }
++
++  const payload = {
++    collections: { posts: { config: { timestamps: true } }, tasks: { config: { timestamps: true } } },
++    config: { collections: [{ slug: 'posts', flattenedFields: [] }, { slug: 'tasks', flattenedFields: [] }] },
++    count: async ({ collection }: { collection: string }) => ({ totalDocs: docs[collection]!.size }),
++    create: async ({ collection, data }: { collection: string; data: Record<string, unknown> }) => {
++      validate(collection, data)
++      const now = tick()
++      const doc = { ...withRowIds(data), id: nextId++, createdAt: now, updatedAt: now } as Doc
++      docs[collection]!.set(doc.id, doc)
++      return clone(doc)
++    },
++    delete: async ({ collection, id, where }: { collection: string; id?: number; where?: Record<string, unknown> }) => {
++      if (id !== undefined) {
++        const d = get(collection, id)
++        docs[collection]!.delete(d.id)
++        return clone(d)
++      }
++      const hit = [...docs[collection]!.values()].filter((d) => matches(d, where))
++      for (const d of hit) {
++        docs[collection]!.delete(d.id)
++      }
++      return { docs: hit.map(clone), errors: [] }
++    },
++    find: async ({ collection, select: sel, where }: { collection: string; select?: Record<string, unknown>; where?: Record<string, unknown> }) => {
++      if (collection === 'payload-locked-documents') {
++        return { docs: [], page: 1, totalDocs: 0, totalPages: 1 }
++      }
++      const hit = [...docs[collection]!.values()].filter((d) => matches(d, where)).map((d) => select(d, sel))
++      return { docs: hit, page: 1, totalDocs: hit.length, totalPages: 1 }
++    },
++    findByID: async ({ id, collection, select: sel }: { collection: string; id: number | string; select?: Record<string, unknown> }) =>
++      select(get(collection, id), sel),
++    logger: { error: () => {}, info: () => {}, warn: () => {} },
++    update: async ({ id, collection, data, where }: { collection: string; data: Record<string, unknown>; id?: number; where?: Record<string, unknown> }) => {
++      if (id !== undefined) {
++        return updateOne(collection, Number(id), data)
++      }
++      const hit = [...docs[collection]!.values()].filter((d) => matches(d, where))
++      const out: Doc[] = []
++      const errors: Array<{ id: unknown; message: string }> = []
++      for (const d of hit) {
++        try {
++          out.push(updateOne(collection, d.id, data) as Doc)
++        } catch (e) {
++          errors.push({ id: d.id, message: (e as Error).message })
++        }
++      }
++      return { docs: out, errors }
++    },
++  }
++
++  /** A write by another writer (REST, or anyone): changes the document and its updatedAt. */
++  const writeDirect = (collection: string, id: number, data: Record<string, unknown>) => updateOne(collection, id, data)
++  const read = (collection: string, id: number) => clone(get(collection, id))
++  const all = (collection: string) => [...docs[collection]!.values()].map(clone)
++  return { all, payload, read, writeDirect }
++}
++
++export type Store = ReturnType<typeof createStore>
++
++/**
++ * One MCP client session on its own server instance (the plugin builds a server per request), all of them signed
++ * in as the same user through the same key, which is how two agents sharing one MCP API key look to the plugin.
++ */
++export async function connect(store: Store, user: TypedUser = { id: 1, collection: 'users' } as unknown as TypedUser) {
++  const server = new McpServer({ name: 'payload-test', version: '0.0.0' })
++  const req = { payload: store.payload, user } as unknown as PayloadRequest
++  const collections = { posts: { enabled: true }, tasks: { enabled: true } } as never
++  for (const slug of ['tasks', 'posts']) {
++    createResourceTool(server, req, user, false, slug, collections, schemas[slug]!)
++    updateResourceTool(server, req, user, false, slug, collections, schemas[slug]!)
++    findResourceTool(server, req, user, false, slug, collections)
++    deleteResourceTool(server, req, user, false, slug, collections)
++  }
++  const [a, b] = InMemoryTransport.createLinkedPair()
++  const client = new Client({ name: 'spec', version: '0.0.0' })
++  await Promise.all([server.connect(a), client.connect(b)])
++  const call = async (name: string, args: Record<string, unknown>) => {
++    const r = (await client.callTool({ name, arguments: args })) as { content: Array<{ text: string }>; isError?: boolean }
++    return { isError: Boolean(r.isError), text: r.content?.[0]?.text ?? '' }
++  }
++  const tools = async () => (await client.listTools()).tools
++  return { call, close: () => client.close(), tools }
++}
++
++/** The JSON object a compact receipt or a conflict answer carries on its first line that starts with "{". */
++export const jsonIn = (text: string): Record<string, unknown> => {
++  const line = text.split('\n').find((l) => l.trim().startsWith('{')) ?? text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1)
++  return JSON.parse(line.slice(line.indexOf('{'), line.lastIndexOf('}') + 1)) as Record<string, unknown>
++}
+diff --git a/packages/plugin-mcp/src/mcp/tools/resource/find.ts b/packages/plugin-mcp/src/mcp/tools/resource/find.ts
+index c32ac2d..f141290 100644
+--- a/packages/plugin-mcp/src/mcp/tools/resource/find.ts
++++ b/packages/plugin-mcp/src/mcp/tools/resource/find.ts
+@@ -4,7 +4,7 @@ import type { JoinQuery, PayloadRequest, PopulateType, SelectType, TypedUser } f
+ import type { MCPPluginConfig } from '../../../types.js'
+ 
+ import { toCamelCase } from '../../../utils/camelCase.js'
+-import { rememberRead, stripAdded, versionSelect } from '../../helpers/writeSafety.js'
++import { versionSelect } from '../../helpers/writeSafety.js'
+ import { toolSchemas } from '../schemas.js'
+ 
+ export const findResourceTool = (
+@@ -37,9 +37,8 @@ export const findResourceTool = (
+     }>
+   }> => {
+     const payload = req.payload
+-    // C-readversion with select (v2.1): always fetch the version fields the read-version memory needs.
+-    const vs = versionSelect(select)
+-    const querySelect = vs.select
++    // C-version with select (v2.1; v2.2): every answer carries updatedAt, the version a later write must send.
++    const querySelect = versionSelect(select)
+ 
+     if (verboseLogs) {
+       payload.logger.info(
+@@ -90,8 +89,6 @@ export const findResourceTool = (
+             ...(trash !== undefined && { trash }),
+           })
+ 
+-          rememberRead(user, collectionSlug, [doc])
+-          stripAdded([doc], vs.added)
+           if (verboseLogs) {
+             payload.logger.info(`[payload-mcp] Found document with ID: ${id}`)
+           }
+@@ -163,8 +160,6 @@ ${JSON.stringify(doc)}`,
+       }
+ 
+       const result = await payload.find(findOptions)
+-      rememberRead(user, collectionSlug, result.docs)
+-      stripAdded(result.docs, vs.added)
+ 
+       if (verboseLogs) {
+         payload.logger.info(
+diff --git a/packages/plugin-mcp/src/mcp/tools/resource/update.ts b/packages/plugin-mcp/src/mcp/tools/resource/update.ts
+index e49065f..413d417 100644
+--- a/packages/plugin-mcp/src/mcp/tools/resource/update.ts
++++ b/packages/plugin-mcp/src/mcp/tools/resource/update.ts
+@@ -24,13 +24,14 @@ import {
+   isVersionMap,
+   lockConflict,
+   lockInfo,
++  missingVersion,
+   OPERATION_ARGS,
+-  readVersionCheck,
+   receipt,
+-  rememberRead,
+   staleConflict,
+   type ToolResponse,
+   type VersionMap,
++  versionArg,
++  versionRequired,
+ } from '../../helpers/writeSafety.js'
+ import { toolSchemas } from '../schemas.js'
+ 
+@@ -84,10 +85,11 @@ export const updateResourceTool = (
+     if (id === undefined && typeof o.ifUpdatedAt === 'string') {
+       return out(
+         errorResponse(
+-          'Error: ifUpdatedAt as a single value pins one document (use it with id). For a bulk call pass a map {"<id>": "<updatedAt>"}, or leave it out: each document is checked against the version you last read. Nothing was changed.',
++          'Error: ifUpdatedAt as a single value is the version of one document (use it with id). For a bulk call pass a map {"<id>": "<updatedAt>"} with the version of each document you read. Nothing was changed.',
+         ),
+       )
+     }
++    const checked = versionRequired(req, collectionSlug)
+ 
+     let whereClause: Record<string, unknown> = {}
+     if (id === undefined && where) {
+@@ -111,18 +113,18 @@ export const updateResourceTool = (
+ 
+     try {
+       if (id !== undefined) {
+-        // C-conflict: optional precondition on the version the agent read.
++        // C-version (v2.2): the write carries the version it is based on; a write without one is refused.
+         if (pin) {
+           const current = await currentUpdatedAt({ collectionSlug, id, req, user })
+           if (current !== pin) {
+             return out(staleConflict({ action: 'update', collectionSlug, current, currentDoc: await currentDocument({ collectionSlug, id, req, user }), id, readTool, sent: pin }))
+           }
+-        } else {
+-          // C-readversion: no explicit precondition: the version this user last read is the precondition.
+-          const stale = await readVersionCheck({ collectionSlug, id, req, user })
+-          if (stale) {
+-            return out(staleConflict({ action: 'update', collectionSlug, current: stale.current, currentDoc: await currentDocument({ collectionSlug, id, req, user }), id, readTool, sent: stale.seen }))
++        } else if (checked) {
++          const currentDoc = await currentDocument({ collectionSlug, id, req, user })
++          if (currentDoc) {
++            return out(missingVersion({ action: 'update', collectionSlug, currentDoc, id, readTool }))
+           }
++          // a missing document is reported by the write itself
+         }
+         const result = await payload.update({
+           id,
+@@ -139,7 +141,6 @@ export const updateResourceTool = (
+           ...(o.select && { select: o.select as SelectType }),
+         } as never)
+         const doc = result as unknown as Record<string, unknown>
+-        rememberRead(user, collectionSlug, [doc])
+         if (o.returnDocument || o.select) {
+           return out(
+             {
+@@ -156,9 +157,12 @@ export const updateResourceTool = (
+         return out(receipt({ action: 'updated', collectionSlug, doc, written }), result)
+       }
+ 
+-      // Bulk (v2): per-document preconditions (pinned in the ifUpdatedAt map, else the version this user last read);
+-      // stale documents are refused with their current state, the rest are updated; per-document results, isError
++      // Bulk (v2; v2.2): per-document preconditions from the ifUpdatedAt map, which the call must carry; stale and
++      // unnamed documents are refused with their current state, the rest are updated; per-document results, isError
+       // when any document was not changed (C-bulk, best-effort).
++      if (checked && !versions) {
++        return out(errorResponse('Error: a bulk update needs ifUpdatedAt as a map {"<id>": "<updatedAt>"} with the version of each document you read. Nothing was changed.'))
++      }
+       const pre = await bulkPreflight({ collectionSlug, req, user, versions, where: whereClause })
+       let docs: Record<string, unknown>[] = []
+       let errors: { id?: unknown; message?: string }[] = []
+@@ -186,7 +190,6 @@ export const updateResourceTool = (
+           }
+         }
+       }
+-      rememberRead(user, collectionSlug, docs)
+       return out(
+         bulkAnswer({ action: 'updated', applied: docs, collectionSlug, errors, readTool, refused: pre.refused, returnDocument: o.returnDocument, unmatchedPins: pre.unmatchedPins }),
+         { docs, errors, refused: pre.refused },
+@@ -232,12 +235,7 @@ export const updateResourceTool = (
+         .optional()
+         .describe('Optional: fallback locale code to use when requested locale is not available'),
+       id: z.union([z.string(), z.number()]).optional().describe('The ID of the document to update'),
+-      ifUpdatedAt: z
+-        .union([z.string(), z.record(z.string(), z.string())])
+-        .optional()
+-        .describe(
+-          'Optional pin; without it each document is checked against the version you last read. With id: the updatedAt string. With where: a map {"<id>": "<updatedAt>"}. A changed document is not written; you get its current version',
+-        ),
++      ifUpdatedAt: versionArg(versionRequired(req, collectionSlug), 'update'),
+       locale: z
+         .string()
+         .optional()
+diff --git a/packages/plugin-mcp/src/mcp/tools/resource/versionPrecondition.spec.ts b/packages/plugin-mcp/src/mcp/tools/resource/versionPrecondition.spec.ts
+new file mode 100644
+index 0000000..c9c79ae
+--- /dev/null
++++ b/packages/plugin-mcp/src/mcp/tools/resource/versionPrecondition.spec.ts
+@@ -0,0 +1,184 @@
++// PAY-09 (F9): the version precondition is checked per write. The caller sends the version it read (ifUpdatedAt);
++// a write based on a version that is no longer current is refused whoever sends it, including a second session
++// that uses the same key as the session that changed the document. Research v2.1 kept the version per user in
++// server memory instead, so a second session of the same user refreshed it and the stale write went through.
++import { beforeEach, describe, expect, it, vi } from 'vitest'
++
++vi.mock('payload/shared', () => ({ fieldIsVirtual: () => false }))
++
++import { connect, createStore, jsonIn, type Store } from './fakePayload.spec-utils.js'
++
++let store: Store
++beforeEach(() => {
++  store = createStore()
++})
++
++const seedPost = async () =>
++  (await store.payload.create({
++    collection: 'posts',
++    data: { title: 'p', author: 'ann', items: [{ label: 'one', url: 'https://example.test/1' }] },
++  })) as { id: number; updatedAt: string }
++const seedTask = async (title: string) =>
++  (await store.payload.create({ collection: 'tasks', data: { title, owner: 'ann', status: 'todo', priority: 2 } })) as {
++    id: number
++    updatedAt: string
++  }
++
++describe('per-write version precondition (PAY-09)', () => {
++  it('refuses a stale write from one session after another session of the same key changed the document', async () => {
++    const post = await seedPost()
++    const a = await connect(store)
++    const b = await connect(store)
++    const readA = jsonIn((await a.call('findPosts', { id: post.id })).text)
++    const readB = jsonIn((await b.call('findPosts', { id: post.id })).text)
++    const wB = await b.call('updatePosts', { id: post.id, author: 'carol', ifUpdatedAt: readB.updatedAt })
++    expect(wB.isError).toBe(false)
++
++    const wA = await a.call('updatePosts', {
++      id: post.id,
++      ifUpdatedAt: readA.updatedAt,
++      items: [{ label: 'one', url: 'https://example.test/a' }],
++    })
++    expect(wA.isError).toBe(true)
++    expect(wA.text).toMatch(/changed since you read it/)
++    expect(wA.text).toMatch(/NOT applied/)
++    const now = store.read('posts', post.id)
++    expect(now.author).toBe('carol')
++    expect((now.items as Array<{ url: string }>)[0]!.url).toBe('https://example.test/1')
++  })
++
++  it('refuses an update by id that carries no version, whoever wrote last, and changes nothing', async () => {
++    const post = await seedPost()
++    const a = await connect(store)
++    const b = await connect(store)
++    await a.call('findPosts', { id: post.id })
++    const readB = jsonIn((await b.call('findPosts', { id: post.id })).text)
++    await b.call('updatePosts', { id: post.id, author: 'carol', ifUpdatedAt: readB.updatedAt })
++    const before = store.read('posts', post.id)
++
++    const wA = await a.call('updatePosts', { id: post.id, items: [{ label: 'one', url: 'https://example.test/a' }] })
++    expect(wA.isError).toBe(true)
++    expect(wA.text).toMatch(/ifUpdatedAt/)
++    expect(store.read('posts', post.id)).toEqual(before)
++  })
++
++  it('refuses a delete by id with no version or a stale one, and deletes with the current one', async () => {
++    const task = await seedTask('t')
++    const a = await connect(store)
++    const b = await connect(store)
++    const read = jsonIn((await a.call('findTasks', { id: task.id })).text)
++    const readB = jsonIn((await b.call('findTasks', { id: task.id })).text)
++    await b.call('updateTasks', { id: task.id, owner: 'bob', ifUpdatedAt: readB.updatedAt })
++
++    const noVersion = await a.call('deleteTasks', { id: task.id })
++    expect(noVersion.isError).toBe(true)
++    expect(noVersion.text).toMatch(/ifUpdatedAt/)
++    const stale = await a.call('deleteTasks', { id: task.id, ifUpdatedAt: read.updatedAt })
++    expect(stale.isError).toBe(true)
++    expect(stale.text).toMatch(/changed since you read it/)
++    expect(store.all('tasks')).toHaveLength(1)
++
++    const ok = await a.call('deleteTasks', { id: task.id, ifUpdatedAt: store.read('tasks', task.id).updatedAt })
++    expect(ok.isError).toBe(false)
++    expect(store.all('tasks')).toHaveLength(0)
++  })
++
++  it('refuses a bulk update with no version map, and changes nothing', async () => {
++    const t1 = await seedTask('t1')
++    const t2 = await seedTask('t2')
++    const a = await connect(store)
++    const b = await connect(store)
++    await a.call('findTasks', { where: JSON.stringify({ id: { in: [t1.id, t2.id] } }) })
++    const readB = jsonIn((await b.call('findTasks', { id: t2.id })).text)
++    await b.call('updateTasks', { id: t2.id, owner: 'bob', ifUpdatedAt: readB.updatedAt })
++
++    const w = await a.call('updateTasks', { where: JSON.stringify({ id: { in: [t1.id, t2.id] } }), status: 'done' })
++    expect(w.isError).toBe(true)
++    expect(w.text).toMatch(/ifUpdatedAt/)
++    expect(store.all('tasks').map((t) => t.status)).toEqual(['todo', 'todo'])
++  })
++
++  it('bulk update with a version map: the stale document is refused, the current one is written', async () => {
++    const t1 = await seedTask('t1')
++    const t2 = await seedTask('t2')
++    const a = await connect(store)
++    const b = await connect(store)
++    await a.call('findTasks', { where: JSON.stringify({ id: { in: [t1.id, t2.id] } }) })
++    const v1 = store.read('tasks', t1.id).updatedAt
++    const v2 = store.read('tasks', t2.id).updatedAt
++    const readB = jsonIn((await b.call('findTasks', { id: t2.id })).text)
++    await b.call('updateTasks', { id: t2.id, owner: 'bob', ifUpdatedAt: readB.updatedAt })
++
++    const w = await a.call('updateTasks', { ifUpdatedAt: { [t1.id]: v1, [t2.id]: v2 }, status: 'done' })
++    expect(w.isError).toBe(true)
++    expect(w.text).toMatch(/^PARTIAL/)
++    expect(store.read('tasks', t1.id).status).toBe('done')
++    expect(store.read('tasks', t2.id).status).toBe('todo')
++    expect(store.read('tasks', t2.id).owner).toBe('bob')
++  })
++
++  it('bulk: a document the where matches but the version map does not name is not changed', async () => {
++    const t1 = await seedTask('t1')
++    const t2 = await seedTask('t2')
++    const a = await connect(store)
++    await a.call('findTasks', { where: JSON.stringify({ id: { in: [t1.id, t2.id] } }) })
++    const v1 = store.read('tasks', t1.id).updatedAt
++
++    const w = await a.call('updateTasks', {
++      ifUpdatedAt: { [t1.id]: v1 },
++      status: 'done',
++      where: JSON.stringify({ id: { in: [t1.id, t2.id] } }),
++    })
++    expect(w.isError).toBe(true)
++    expect(w.text).toMatch(/^PARTIAL/)
++    expect(w.text).toMatch(/no version/)
++    expect(store.read('tasks', t1.id).status).toBe('done')
++    expect(store.read('tasks', t2.id).status).toBe('todo')
++  })
++
++  it('refuses a bulk delete with no version map', async () => {
++    const t1 = await seedTask('t1')
++    const a = await connect(store)
++    await a.call('findTasks', { id: t1.id })
++    const d = await a.call('deleteTasks', { where: JSON.stringify({ id: { in: [t1.id] } }) })
++    expect(d.isError).toBe(true)
++    expect(d.text).toMatch(/ifUpdatedAt/)
++    expect(store.all('tasks')).toHaveLength(1)
++  })
++
++  it('a find with select still answers updatedAt, so the caller has the version to send', async () => {
++    const task = await seedTask('t')
++    const a = await connect(store)
++    const byId = jsonIn((await a.call('findTasks', { id: task.id, select: { title: true } })).text)
++    expect(byId.updatedAt).toBe(store.read('tasks', task.id).updatedAt)
++    const list = (await a.call('findTasks', { select: { title: true } })).text
++    expect(list).toContain(`"updatedAt":"${store.read('tasks', task.id).updatedAt}"`)
++  })
++
++  it('a write receipt carries the new version, which the next write can send', async () => {
++    const task = await seedTask('t')
++    const a = await connect(store)
++    const r1 = await a.call('updateTasks', { id: task.id, owner: 'x', ifUpdatedAt: task.updatedAt })
++    expect(r1.isError).toBe(false)
++    const v = jsonIn(r1.text).updatedAt
++    expect(v).toBe(store.read('tasks', task.id).updatedAt)
++    const r2 = await a.call('updateTasks', { id: task.id, owner: 'y', ifUpdatedAt: v })
++    expect(r2.isError).toBe(false)
++    expect(store.read('tasks', task.id).owner).toBe('y')
++  })
++
++  it('declares ifUpdatedAt as required on update and delete, and an id missing from a map is refused with the current document', async () => {
++    const task = await seedTask('t')
++    const a = await connect(store)
++    const tools = await a.tools()
++    for (const name of ['updateTasks', 'deleteTasks', 'updatePosts', 'deletePosts']) {
++      const t = tools.find((x) => x.name === name)!
++      expect(t.inputSchema.required).toContain('ifUpdatedAt')
++    }
++    const w = await a.call('updateTasks', { id: task.id, ifUpdatedAt: { '999': task.updatedAt }, owner: 'x' })
++    expect(w.isError).toBe(true)
++    expect(w.text).toMatch(/needs ifUpdatedAt/)
++    expect(jsonIn(w.text).currentDocument).toMatchObject({ id: task.id, owner: 'ann' })
++    expect(store.read('tasks', task.id).owner).toBe('ann')
++  })
++})
+-- 
+2.50.1 (Apple Git-155)
+

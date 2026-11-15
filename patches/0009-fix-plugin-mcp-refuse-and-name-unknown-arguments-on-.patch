@@ -1,0 +1,374 @@
+From 265fb7f31b0712c244ea9141d92d9ee579115361 Mon Sep 17 00:00:00 2001
+From: Joshua Bryan <45343084+rafe-walker@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 13:23:46 -0700
+Subject: [PATCH 09/11] fix(plugin-mcp): refuse and name unknown arguments on
+ every collection tool (research v2.2)
+
+The tool schemas advertise additionalProperties: false, but the MCP SDK
+parses a plain object schema in zod's default strip mode, so an argument the
+schema does not name was dropped silently. Research v1 to v2.1 refused only an
+update made of nothing but such arguments ("nothing to write"); a misspelled
+field next to a valid one was dropped and the rest written, and create and
+find dropped them too.
+
+create, find, update and delete now pass a strict object schema to the SDK
+(helpers/strictArgs.ts). A call with an unknown argument is refused before
+anything runs, with isError and a message that names each unknown argument
+and the nearest known name ("updateTasks does not take the argument "ttle"
+(did you mean "title"?)"). The data argument is strict the same way. Unknown
+keys inside array rows were already refused by the converted field schema;
+that is unchanged and now tested.
+
+Tests: unknownArguments.spec.ts (8).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../plugin-mcp/src/mcp/helpers/strictArgs.ts  |  56 ++++++++++
+ .../src/mcp/tools/resource/create.ts          |  14 +--
+ .../src/mcp/tools/resource/delete.ts          |  11 +-
+ .../plugin-mcp/src/mcp/tools/resource/find.ts |   7 +-
+ .../tools/resource/unknownArguments.spec.ts   | 101 ++++++++++++++++++
+ .../src/mcp/tools/resource/update.ts          |  14 +--
+ 6 files changed, 185 insertions(+), 18 deletions(-)
+ create mode 100644 packages/plugin-mcp/src/mcp/helpers/strictArgs.ts
+ create mode 100644 packages/plugin-mcp/src/mcp/tools/resource/unknownArguments.spec.ts
+
+diff --git a/packages/plugin-mcp/src/mcp/helpers/strictArgs.ts b/packages/plugin-mcp/src/mcp/helpers/strictArgs.ts
+new file mode 100644
+index 0000000..502b702
+--- /dev/null
++++ b/packages/plugin-mcp/src/mcp/helpers/strictArgs.ts
+@@ -0,0 +1,56 @@
++import { z } from 'zod'
++
++/**
++ * C-strict-args (research v2.2, PAY-11): the collection tools refuse an argument their schema does not name, and say
++ * which one. The schemas already advertise `additionalProperties: false`, but the MCP SDK parses a plain object
++ * schema in zod's default "strip" mode, so an unknown argument (a misspelled field, a field of another collection)
++ * was dropped without a word and the rest of the call went ahead. Nothing runs when the call is refused.
++ */
++export function strictArgs<T extends z.ZodRawShape>(shape: T, toolName: string) {
++  const known = Object.keys(shape)
++  return z
++    .object(shape, {
++      errorMap: (issue, ctx) =>
++        issue.code === 'unrecognized_keys' ? { message: unknownArgsMessage(toolName, issue.keys, known) } : { message: ctx.defaultError },
++    })
++    .strict()
++}
++
++export function unknownArgsMessage(toolName: string, keys: string[], known: string[]): string {
++  const named = keys.map((k) => {
++    const near = closest(k, known)
++    return near ? `"${k}" (did you mean "${near}"?)` : `"${k}"`
++  })
++  return (
++    `${toolName} does not take the argument${keys.length > 1 ? 's' : ''} ${named.join(', ')}. ` +
++    `The call was refused and nothing was read or changed: send only the arguments in the tool's schema.`
++  )
++}
++
++/** The known name nearest to a misspelled one (case-insensitive edit distance of at most 2), if any. */
++function closest(name: string, known: string[]): string | undefined {
++  let best: string | undefined
++  let bestD = 3
++  for (const k of known) {
++    const d = distance(name.toLowerCase(), k.toLowerCase())
++    if (d < bestD) {
++      best = k
++      bestD = d
++    }
++  }
++  return best
++}
++
++function distance(a: string, b: string): number {
++  const row = Array.from({ length: b.length + 1 }, (_, j) => j)
++  for (let i = 1; i <= a.length; i++) {
++    let prev = row[0]!
++    row[0] = i
++    for (let j = 1; j <= b.length; j++) {
++      const tmp = row[j]!
++      row[j] = Math.min(row[j]! + 1, row[j - 1]! + 1, prev + (a[i - 1] === b[j - 1] ? 0 : 1))
++      prev = tmp
++    }
++  }
++  return row[b.length]!
++}
+diff --git a/packages/plugin-mcp/src/mcp/tools/resource/create.ts b/packages/plugin-mcp/src/mcp/tools/resource/create.ts
+index 95ef8fc..c0f7215 100644
+--- a/packages/plugin-mcp/src/mcp/tools/resource/create.ts
++++ b/packages/plugin-mcp/src/mcp/tools/resource/create.ts
+@@ -14,6 +14,7 @@ import {
+ import { convertCollectionSchemaToZod } from '../../../utils/schemaConversion/convertCollectionSchemaToZod.js'
+ import { transformPointDataToPayload } from '../../../utils/transformPointDataToPayload.js'
+ import { errorResponse, OPERATION_ARGS, receipt } from '../../helpers/writeSafety.js'
++import { strictArgs } from '../../helpers/strictArgs.js'
+ import { toolSchemas } from '../schemas.js'
+ export const createResourceTool = (
+   server: McpServer,
+@@ -134,12 +135,13 @@ ${JSON.stringify(result)}
+     // C-args: fields named like an operation argument are written through `data` only.
+     const shape = convertedFields.shape as Record<string, z.ZodTypeAny>
+     const colliding = Object.keys(shape).filter((k) => OPERATION_ARGS.includes(k))
+-    const createResourceSchema = z.object({
++    // C-strict-args (v2.2): an argument the schema does not name is refused and named, never dropped.
++    const name = `create${collectionSlug.charAt(0).toUpperCase() + toCamelCase(collectionSlug).slice(1)}`
++    const createResourceSchema = strictArgs({
+       ...Object.fromEntries(Object.entries(shape).filter(([k]) => !OPERATION_ARGS.includes(k))),
+       ...(colliding.length
+         ? {
+-            data: z
+-              .object(Object.fromEntries(colliding.map((k) => [k, shape[k]!])))
++            data: strictArgs(Object.fromEntries(colliding.map((k) => [k, shape[k]!])), `${name} (in data)`)
+               .partial()
+               .optional()
+               .describe(`Document fields named ${colliding.join(', ')}: write them here (the top-level names are operation arguments).`),
+@@ -175,14 +177,14 @@ ${JSON.stringify(result)}
+         .describe(
+           "Optional: define exactly which fields you'd like to return in the response, e.g., {\"title\": true}",
+         ),
+-    })
++    }, name)
+ 
+     server.registerTool(
+-      `create${collectionSlug.charAt(0).toUpperCase() + toCamelCase(collectionSlug).slice(1)}`,
++      name,
+       {
+         annotations: { destructiveHint: false, idempotentHint: false, openWorldHint: false, readOnlyHint: false },
+         description: `${collections?.[collectionSlug]?.description || toolSchemas.createResource.description.trim()}`,
+-        inputSchema: createResourceSchema.shape,
++        inputSchema: createResourceSchema,
+       },
+       async (params: Record<string, unknown>) => {
+         const { data: nested, depth, draft, fallbackLocale, locale, returnDocument, select, ...fieldData } = params
+diff --git a/packages/plugin-mcp/src/mcp/tools/resource/delete.ts b/packages/plugin-mcp/src/mcp/tools/resource/delete.ts
+index 6a41a3a..1c48d6c 100644
+--- a/packages/plugin-mcp/src/mcp/tools/resource/delete.ts
++++ b/packages/plugin-mcp/src/mcp/tools/resource/delete.ts
+@@ -25,6 +25,7 @@ import {
+   versionArg,
+   versionRequired,
+ } from '../../helpers/writeSafety.js'
++import { strictArgs } from '../../helpers/strictArgs.js'
+ import { toolSchemas } from '../schemas.js'
+ 
+ const toolName = (slug: string, verb: string) =>
+@@ -170,7 +171,9 @@ export const deleteResourceTool = (
+   }
+ 
+   if (collections?.[collectionSlug]?.enabled) {
+-    const deleteSchema = z.object({
++    // C-strict-args (v2.2): an argument the schema does not name is refused and named, never dropped.
++    const name = toolName(collectionSlug, 'delete')
++    const deleteSchema = strictArgs({
+       ...toolSchemas.deleteResource.parameters.shape,
+       all: z.boolean().optional().default(false).describe('Required to delete every document with an empty where clause'),
+       ifUpdatedAt: versionArg(versionRequired(req, collectionSlug), 'delete'),
+@@ -182,13 +185,13 @@ export const deleteResourceTool = (
+           'Default false: a document another user has open for editing is not deleted, and you are told who has it. True deletes it anyway; only when the user asked for that',
+         ),
+       returnDocument: z.boolean().optional().default(false).describe('Return the whole deleted document instead of a compact receipt'),
+-    })
++    }, name)
+     server.registerTool(
+-      toolName(collectionSlug, 'delete'),
++      name,
+       {
+         annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: false, readOnlyHint: false },
+         description: `${collections?.[collectionSlug]?.description || toolSchemas.deleteResource.description.trim()}`,
+-        inputSchema: deleteSchema.shape,
++        inputSchema: deleteSchema,
+       },
+       async (p: Record<string, unknown>) =>
+         await tool({
+diff --git a/packages/plugin-mcp/src/mcp/tools/resource/find.ts b/packages/plugin-mcp/src/mcp/tools/resource/find.ts
+index f141290..483c20c 100644
+--- a/packages/plugin-mcp/src/mcp/tools/resource/find.ts
++++ b/packages/plugin-mcp/src/mcp/tools/resource/find.ts
+@@ -4,6 +4,7 @@ import type { JoinQuery, PayloadRequest, PopulateType, SelectType, TypedUser } f
+ import type { MCPPluginConfig } from '../../../types.js'
+ 
+ import { toCamelCase } from '../../../utils/camelCase.js'
++import { strictArgs } from '../../helpers/strictArgs.js'
+ import { versionSelect } from '../../helpers/writeSafety.js'
+ import { toolSchemas } from '../schemas.js'
+ 
+@@ -215,12 +216,14 @@ Page: ${result.page} of ${result.totalPages}
+   }
+ 
+   if (collections?.[collectionSlug]?.enabled) {
++    const name = `find${collectionSlug.charAt(0).toUpperCase() + toCamelCase(collectionSlug).slice(1)}`
+     server.registerTool(
+-      `find${collectionSlug.charAt(0).toUpperCase() + toCamelCase(collectionSlug).slice(1)}`,
++      name,
+       {
+         annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false, readOnlyHint: true },
+         description: `${collections?.[collectionSlug]?.description || toolSchemas.findResources.description.trim()}`,
+-        inputSchema: toolSchemas.findResources.parameters.shape,
++        // C-strict-args (v2.2): an argument the schema does not name is refused and named, never dropped.
++        inputSchema: strictArgs(toolSchemas.findResources.parameters.shape, name),
+       },
+       async ({
+         id,
+diff --git a/packages/plugin-mcp/src/mcp/tools/resource/unknownArguments.spec.ts b/packages/plugin-mcp/src/mcp/tools/resource/unknownArguments.spec.ts
+new file mode 100644
+index 0000000..d319557
+--- /dev/null
++++ b/packages/plugin-mcp/src/mcp/tools/resource/unknownArguments.spec.ts
+@@ -0,0 +1,101 @@
++// PAY-11 (F11): an argument the tool's schema does not name is refused on every collection tool (create, find,
++// update, delete), also when it sits next to valid fields, and the refusal names it. Research v2.1 refused only an
++// update made of nothing but unknown arguments ("nothing to write"); every other call dropped them silently.
++import { beforeEach, describe, expect, it, vi } from 'vitest'
++
++vi.mock('payload/shared', () => ({ fieldIsVirtual: () => false }))
++
++import { connect, createStore, type Store } from './fakePayload.spec-utils.js'
++
++let store: Store
++beforeEach(() => {
++  store = createStore()
++})
++
++const seedTask = async () =>
++  (await store.payload.create({ collection: 'tasks', data: { title: 't', owner: 'ann', status: 'todo', priority: 2 } })) as {
++    id: number
++    updatedAt: string
++  }
++
++describe('unknown arguments are refused and named (PAY-11)', () => {
++  it('update: a misspelled field next to a valid one is refused, named, and nothing is written', async () => {
++    const task = await seedTask()
++    const a = await connect(store)
++    const r = await a.call('updateTasks', { id: task.id, ifUpdatedAt: task.updatedAt, owner: 'zed', ttle: 'y' })
++    expect(r.isError).toBe(true)
++    expect(r.text).toContain('"ttle"')
++    expect(r.text).toMatch(/did you mean "title"/)
++    expect(store.read('tasks', task.id)).toMatchObject({ owner: 'ann', title: 't' })
++  })
++
++  it('update: a call made only of a misspelled field is refused and names it', async () => {
++    const task = await seedTask()
++    const a = await connect(store)
++    const r = await a.call('updateTasks', { id: task.id, ifUpdatedAt: task.updatedAt, ttle: 'x' })
++    expect(r.isError).toBe(true)
++    expect(r.text).toContain('"ttle"')
++  })
++
++  it('create: a misspelled field is refused, named, and nothing is created', async () => {
++    const a = await connect(store)
++    const r = await a.call('createTasks', { title: 'new', status: 'todo', owner: 'ann', priority: 2, ttle: 'z' })
++    expect(r.isError).toBe(true)
++    expect(r.text).toContain('"ttle"')
++    expect(store.all('tasks')).toHaveLength(0)
++  })
++
++  it('find: a misspelled argument is refused and named', async () => {
++    const task = await seedTask()
++    const a = await connect(store)
++    const r = await a.call('findTasks', { id: task.id, dpth: 1 })
++    expect(r.isError).toBe(true)
++    expect(r.text).toContain('"dpth"')
++    expect(r.text).toMatch(/did you mean "depth"/)
++  })
++
++  it('delete: an unknown argument is refused, named, and nothing is deleted', async () => {
++    const task = await seedTask()
++    const a = await connect(store)
++    const r = await a.call('deleteTasks', { id: task.id, ifUpdatedAt: task.updatedAt, force: true })
++    expect(r.isError).toBe(true)
++    expect(r.text).toContain('"force"')
++    expect(store.all('tasks')).toHaveLength(1)
++  })
++
++  it('an unknown key inside an array row is refused and named with its path', async () => {
++    const post = (await store.payload.create({ collection: 'posts', data: { title: 'p', items: [{ label: 'one' }] } })) as {
++      id: number
++      updatedAt: string
++    }
++    const a = await connect(store)
++    const r = await a.call('updatePosts', { id: post.id, ifUpdatedAt: post.updatedAt, items: [{ lable: 'two' }] })
++    expect(r.isError).toBe(true)
++    expect(r.text).toContain('lable')
++    expect(r.text).toMatch(/items/)
++    expect((store.read('posts', post.id).items as Array<{ label: string }>)[0]!.label).toBe('one')
++  })
++
++  it('every collection tool advertises that it takes no other arguments', async () => {
++    const a = await connect(store)
++    const tools = await a.tools()
++    for (const verb of ['create', 'find', 'update', 'delete']) {
++      for (const c of ['Tasks', 'Posts']) {
++        const t = tools.find((x) => x.name === `${verb}${c}`)!
++        expect(t.inputSchema.additionalProperties, `${verb}${c}`).toBe(false)
++      }
++    }
++  })
++
++  it('calls with only known arguments still work', async () => {
++    const a = await connect(store)
++    const c = await a.call('createTasks', { title: 'ok', status: 'todo', owner: 'ann', priority: 1 })
++    expect(c.isError).toBe(false)
++    const task = store.all('tasks')[0]!
++    const f = await a.call('findTasks', { id: task.id, depth: 0 })
++    expect(f.isError).toBe(false)
++    const u = await a.call('updateTasks', { id: task.id, ifUpdatedAt: task.updatedAt, owner: 'bob' })
++    expect(u.isError).toBe(false)
++    expect(store.read('tasks', task.id).owner).toBe('bob')
++  })
++})
+diff --git a/packages/plugin-mcp/src/mcp/tools/resource/update.ts b/packages/plugin-mcp/src/mcp/tools/resource/update.ts
+index 413d417..1873f1e 100644
+--- a/packages/plugin-mcp/src/mcp/tools/resource/update.ts
++++ b/packages/plugin-mcp/src/mcp/tools/resource/update.ts
+@@ -33,6 +33,7 @@ import {
+   versionArg,
+   versionRequired,
+ } from '../../helpers/writeSafety.js'
++import { strictArgs } from '../../helpers/strictArgs.js'
+ import { toolSchemas } from '../schemas.js'
+ 
+ const toolName = (slug: string, verb: string) =>
+@@ -212,7 +213,9 @@ export const updateResourceTool = (
+     const flatFields = Object.fromEntries(Object.entries(fieldShape).filter(([k]) => !OPERATION_ARGS.includes(k)))
+     const colliding = Object.keys(fieldShape).filter((k) => OPERATION_ARGS.includes(k))
+ 
+-    const updateResourceSchema = z.object({
++    // C-strict-args (v2.2): an argument the schema does not name is refused and named, never dropped.
++    const name = toolName(collectionSlug, 'update')
++    const updateResourceSchema = strictArgs({
+       ...flatFields,
+       all: z
+         .boolean()
+@@ -221,8 +224,7 @@ export const updateResourceTool = (
+         .describe('Required to update every document with an empty where clause'),
+       ...(colliding.length
+         ? {
+-            data: z
+-              .object(Object.fromEntries(colliding.map((k) => [k, fieldShape[k]!])))
++            data: strictArgs(Object.fromEntries(colliding.map((k) => [k, fieldShape[k]!])), `${name} (in data)`)
+               .partial()
+               .optional()
+               .describe(`Document fields named ${colliding.join(', ')}: write them here (the top-level names are operation arguments).`),
+@@ -257,14 +259,14 @@ export const updateResourceTool = (
+         .optional()
+         .describe("Optional: define exactly which fields you'd like to return in the response, e.g., {\"title\": true}"),
+       where: z.string().optional().describe('JSON string for where clause to update multiple documents in one call, e.g. {"id":{"in":[1,2]}}'),
+-    })
++    }, name)
+ 
+     server.registerTool(
+-      toolName(collectionSlug, 'update'),
++      name,
+       {
+         annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: false, readOnlyHint: false },
+         description: `${collections?.[collectionSlug]?.description || toolSchemas.updateResource.description.trim()}`,
+-        inputSchema: updateResourceSchema.shape,
++        inputSchema: updateResourceSchema,
+       },
+       async (params: Record<string, unknown>) => {
+         const {
+-- 
+2.50.1 (Apple Git-155)
+

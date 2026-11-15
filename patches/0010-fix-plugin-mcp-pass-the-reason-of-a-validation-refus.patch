@@ -1,0 +1,174 @@
+From 85fa21ed836fce7cf099d12a1c03b79687fdc340 Mon Sep 17 00:00:00 2001
+From: Joshua Bryan <45343084+rafe-walker@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 13:24:27 -0700
+Subject: [PATCH 10/11] fix(plugin-mcp): pass the reason of a validation
+ refusal through (research v2.2)
+
+Research v1 set isError on a refused create or update, but the text kept only
+Payload's headline, "The following field is invalid: Priority", which names
+the field and drops the reason REST gives. The reasons are in the
+ValidationError's data.errors; create, update and delete now append them:
+
+  The following field is invalid: Priority (priority: 9 is greater than the
+  max allowed Value of 5.)
+
+isError is unchanged. A bulk update still reports each document's headline
+only: Payload's bulk operation keeps only error.message per document.
+
+Tests: refusalReason.spec.ts (3).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../plugin-mcp/src/mcp/helpers/writeSafety.ts | 18 ++++++++
+ .../src/mcp/tools/resource/create.ts          |  4 +-
+ .../src/mcp/tools/resource/delete.ts          |  3 +-
+ .../mcp/tools/resource/refusalReason.spec.ts  | 43 +++++++++++++++++++
+ .../src/mcp/tools/resource/update.ts          |  3 +-
+ 5 files changed, 67 insertions(+), 4 deletions(-)
+ create mode 100644 packages/plugin-mcp/src/mcp/tools/resource/refusalReason.spec.ts
+
+diff --git a/packages/plugin-mcp/src/mcp/helpers/writeSafety.ts b/packages/plugin-mcp/src/mcp/helpers/writeSafety.ts
+index ef2f542..d651813 100644
+--- a/packages/plugin-mcp/src/mcp/helpers/writeSafety.ts
++++ b/packages/plugin-mcp/src/mcp/helpers/writeSafety.ts
+@@ -21,6 +21,24 @@ export type ToolResponse = {
+ // Text only: the JSON in the text is the machine-readable part (no structuredContent copy of the same data).
+ export const errorResponse = (text: string): ToolResponse => ({ content: [{ type: 'text', text }], isError: true })
+ 
++/**
++ * C-reason (research v2.2, PAY-13): the text of a failed write. Payload's ValidationError message names only the
++ * field ("The following field is invalid: Priority"); the reason is in error.data.errors. Both are passed on, so an
++ * agent can correct the value instead of guessing: "... Priority (priority: 9 is greater than the max allowed Value of 5.)".
++ */
++export function errorText(error: unknown): string {
++  if (!(error instanceof Error)) {
++    return 'Unknown error'
++  }
++  const reasons = (error as { data?: { errors?: Array<{ label?: unknown; message?: unknown; path?: unknown }> } }).data?.errors
++  const parts = Array.isArray(reasons)
++    ? reasons
++        .filter((r) => r && typeof r.message === 'string' && r.message)
++        .map((r) => `${typeof r.path === 'string' && r.path ? `${r.path}: ` : ''}${String(r.message)}`)
++    : []
++  return parts.length ? `${error.message} (${parts.join('; ')})` : error.message
++}
++
+ export const isLockedError = (error: unknown): boolean =>
+   error instanceof Error &&
+   (error.name === 'Locked' || (error as { status?: number }).status === 423 || /currently locked/i.test(error.message))
+diff --git a/packages/plugin-mcp/src/mcp/tools/resource/create.ts b/packages/plugin-mcp/src/mcp/tools/resource/create.ts
+index c0f7215..4d5c48b 100644
+--- a/packages/plugin-mcp/src/mcp/tools/resource/create.ts
++++ b/packages/plugin-mcp/src/mcp/tools/resource/create.ts
+@@ -13,7 +13,7 @@ import {
+ } from '../../../utils/getVirtualFieldNames.js'
+ import { convertCollectionSchemaToZod } from '../../../utils/schemaConversion/convertCollectionSchemaToZod.js'
+ import { transformPointDataToPayload } from '../../../utils/transformPointDataToPayload.js'
+-import { errorResponse, OPERATION_ARGS, receipt } from '../../helpers/writeSafety.js'
++import { errorResponse, errorText, OPERATION_ARGS, receipt } from '../../helpers/writeSafety.js'
+ import { strictArgs } from '../../helpers/strictArgs.js'
+ import { toolSchemas } from '../schemas.js'
+ export const createResourceTool = (
+@@ -112,7 +112,7 @@ ${JSON.stringify(result)}
+         }>
+       }
+     } catch (error) {
+-      const errorMessage = error instanceof Error ? error.message : 'Unknown error'
++      const errorMessage = errorText(error)
+       payload.logger.error(
+         `[payload-mcp] Error creating resource in ${collectionSlug}: ${errorMessage}`,
+       )
+diff --git a/packages/plugin-mcp/src/mcp/tools/resource/delete.ts b/packages/plugin-mcp/src/mcp/tools/resource/delete.ts
+index 1c48d6c..a99e18b 100644
+--- a/packages/plugin-mcp/src/mcp/tools/resource/delete.ts
++++ b/packages/plugin-mcp/src/mcp/tools/resource/delete.ts
+@@ -12,6 +12,7 @@ import {
+   currentDocument,
+   currentUpdatedAt,
+   errorResponse,
++  errorText,
+   idsOf,
+   isLockedError,
+   isVersionMap,
+@@ -164,7 +165,7 @@ export const deleteResourceTool = (
+         const info = await lockInfo({ collectionSlug, id, req, user })
+         return out(lockConflict({ action: 'delete', collectionSlug, current: await currentDocument({ collectionSlug, id, req, user }), id, info, readTool }))
+       }
+-      const errorMessage = error instanceof Error ? error.message : 'Unknown error'
++      const errorMessage = errorText(error)
+       payload.logger.error(`[payload-mcp] Error deleting resource from ${collectionSlug}: ${errorMessage}`)
+       return out(errorResponse(`Error deleting resource from collection "${collectionSlug}": ${errorMessage}`))
+     }
+diff --git a/packages/plugin-mcp/src/mcp/tools/resource/refusalReason.spec.ts b/packages/plugin-mcp/src/mcp/tools/resource/refusalReason.spec.ts
+new file mode 100644
+index 0000000..f704ef4
+--- /dev/null
++++ b/packages/plugin-mcp/src/mcp/tools/resource/refusalReason.spec.ts
+@@ -0,0 +1,43 @@
++// PAY-13 (F13): a validation refusal carries Payload's reason (e.g. "9 is greater than the max allowed Value of 5.")
++// as well as isError. Research v2.1 set isError but passed on only the headline "The following field is invalid:
++// Priority", which names the field and drops the reason REST gives.
++import { beforeEach, describe, expect, it, vi } from 'vitest'
++
++vi.mock('payload/shared', () => ({ fieldIsVirtual: () => false }))
++
++import { connect, createStore, type Store } from './fakePayload.spec-utils.js'
++
++let store: Store
++beforeEach(() => {
++  store = createStore()
++})
++
++describe('validation refusals carry the reason (PAY-13)', () => {
++  it('update by id: isError, the field and the reason', async () => {
++    const task = (await store.payload.create({ collection: 'tasks', data: { title: 't', priority: 2 } })) as {
++      id: number
++      updatedAt: string
++    }
++    const a = await connect(store)
++    const r = await a.call('updateTasks', { id: task.id, ifUpdatedAt: task.updatedAt, priority: 9 })
++    expect(r.isError).toBe(true)
++    expect(r.text).toContain('The following field is invalid: Priority')
++    expect(r.text).toContain('priority: 9 is greater than the max allowed Value of 5.')
++    expect(store.read('tasks', task.id).priority).toBe(2)
++  })
++
++  it('create: isError, the field and the reason', async () => {
++    const a = await connect(store)
++    const r = await a.call('createTasks', { title: 't', priority: 9 })
++    expect(r.isError).toBe(true)
++    expect(r.text).toContain('priority: 9 is greater than the max allowed Value of 5.')
++    expect(store.all('tasks')).toHaveLength(0)
++  })
++
++  it('an error without reasons is passed on as it was', async () => {
++    const a = await connect(store)
++    const r = await a.call('updateTasks', { id: 999, ifUpdatedAt: '2026-01-01T00:00:00.000Z', owner: 'x' })
++    expect(r.isError).toBe(true)
++    expect(r.text).toMatch(/Not Found|changed since you read it/)
++  })
++})
+diff --git a/packages/plugin-mcp/src/mcp/tools/resource/update.ts b/packages/plugin-mcp/src/mcp/tools/resource/update.ts
+index 1873f1e..2b97b03 100644
+--- a/packages/plugin-mcp/src/mcp/tools/resource/update.ts
++++ b/packages/plugin-mcp/src/mcp/tools/resource/update.ts
+@@ -19,6 +19,7 @@ import {
+   currentDocument,
+   currentUpdatedAt,
+   errorResponse,
++  errorText,
+   idsOf,
+   isLockedError,
+   isVersionMap,
+@@ -200,7 +201,7 @@ export const updateResourceTool = (
+         const info = await lockInfo({ collectionSlug, id, req, user })
+         return out(lockConflict({ action: 'update', collectionSlug, current: await currentDocument({ collectionSlug, id, req, user }), id, info, readTool }))
+       }
+-      const errorMessage = error instanceof Error ? error.message : 'Unknown error'
++      const errorMessage = errorText(error)
+       payload.logger.error(`[payload-mcp] Error updating resource in ${collectionSlug}: ${errorMessage}`)
+       return out(errorResponse(`Error updating resource in collection "${collectionSlug}": ${errorMessage}`))
+     }
+-- 
+2.50.1 (Apple Git-155)
+

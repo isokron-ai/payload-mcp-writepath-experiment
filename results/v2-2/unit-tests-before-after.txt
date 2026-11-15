@@ -1,0 +1,75 @@
+== versionPrecondition before (code at 98b1853 test: add a unit-test runner for packages/plugin-mcp)
+ ✓ versionPrecondition.spec.ts > per-write version precondition (PAY-09) > refuses a stale write from one session after another session of the same key changed the document
+ × versionPrecondition.spec.ts > per-write version precondition (PAY-09) > refuses an update by id that carries no version, whoever wrote last, and changes nothing
+ × versionPrecondition.spec.ts > per-write version precondition (PAY-09) > refuses a delete by id with no version or a stale one, and deletes with the current one
+ × versionPrecondition.spec.ts > per-write version precondition (PAY-09) > refuses a bulk update with no version map, and changes nothing
+ ✓ versionPrecondition.spec.ts > per-write version precondition (PAY-09) > bulk update with a version map: the stale document is refused, the current one is written
+ × versionPrecondition.spec.ts > per-write version precondition (PAY-09) > bulk: a document the where matches but the version map does not name is not changed
+ × versionPrecondition.spec.ts > per-write version precondition (PAY-09) > refuses a bulk delete with no version map
+ × versionPrecondition.spec.ts > per-write version precondition (PAY-09) > a find with select still answers updatedAt, so the caller has the version to send
+ ✓ versionPrecondition.spec.ts > per-write version precondition (PAY-09) > a write receipt carries the new version, which the next write can send
+ × versionPrecondition.spec.ts > per-write version precondition (PAY-09) > declares ifUpdatedAt as required on update and delete, and an id missing from a map is refused with the current document
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 7 ⎯⎯⎯⎯⎯⎯⎯
+      Tests  7 failed | 3 passed (10)
+== versionPrecondition after (code at bd9fa13 fix(plugin-mcp): version precondition per write, not per use)
+ ✓ versionPrecondition.spec.ts > per-write version precondition (PAY-09) > refuses a stale write from one session after another session of the same key changed the document
+ ✓ versionPrecondition.spec.ts > per-write version precondition (PAY-09) > refuses an update by id that carries no version, whoever wrote last, and changes nothing
+ ✓ versionPrecondition.spec.ts > per-write version precondition (PAY-09) > refuses a delete by id with no version or a stale one, and deletes with the current one
+ ✓ versionPrecondition.spec.ts > per-write version precondition (PAY-09) > refuses a bulk update with no version map, and changes nothing
+ ✓ versionPrecondition.spec.ts > per-write version precondition (PAY-09) > bulk update with a version map: the stale document is refused, the current one is written
+ ✓ versionPrecondition.spec.ts > per-write version precondition (PAY-09) > bulk: a document the where matches but the version map does not name is not changed
+ ✓ versionPrecondition.spec.ts > per-write version precondition (PAY-09) > refuses a bulk delete with no version map
+ ✓ versionPrecondition.spec.ts > per-write version precondition (PAY-09) > a find with select still answers updatedAt, so the caller has the version to send
+ ✓ versionPrecondition.spec.ts > per-write version precondition (PAY-09) > a write receipt carries the new version, which the next write can send
+ ✓ versionPrecondition.spec.ts > per-write version precondition (PAY-09) > declares ifUpdatedAt as required on update and delete, and an id missing from a map is refused with the current document
+      Tests  10 passed (10)
+== unknownArguments before (code at bd9fa13 fix(plugin-mcp): version precondition per write, not per use)
+ × unknownArguments.spec.ts > unknown arguments are refused and named (PAY-11) > update: a misspelled field next to a valid one is refused, named, and nothing is written
+ × unknownArguments.spec.ts > unknown arguments are refused and named (PAY-11) > update: a call made only of a misspelled field is refused and names it
+ × unknownArguments.spec.ts > unknown arguments are refused and named (PAY-11) > create: a misspelled field is refused, named, and nothing is created
+ × unknownArguments.spec.ts > unknown arguments are refused and named (PAY-11) > find: a misspelled argument is refused and named
+ × unknownArguments.spec.ts > unknown arguments are refused and named (PAY-11) > delete: an unknown argument is refused, named, and nothing is deleted
+ ✓ unknownArguments.spec.ts > unknown arguments are refused and named (PAY-11) > an unknown key inside an array row is refused and named with its path
+ ✓ unknownArguments.spec.ts > unknown arguments are refused and named (PAY-11) > every collection tool advertises that it takes no other arguments
+ ✓ unknownArguments.spec.ts > unknown arguments are refused and named (PAY-11) > calls with only known arguments still work
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 5 ⎯⎯⎯⎯⎯⎯⎯
+      Tests  5 failed | 3 passed (8)
+== unknownArguments after (code at 265fb7f fix(plugin-mcp): refuse and name unknown arguments on every )
+ ✓ unknownArguments.spec.ts > unknown arguments are refused and named (PAY-11) > update: a misspelled field next to a valid one is refused, named, and nothing is written
+ ✓ unknownArguments.spec.ts > unknown arguments are refused and named (PAY-11) > update: a call made only of a misspelled field is refused and names it
+ ✓ unknownArguments.spec.ts > unknown arguments are refused and named (PAY-11) > create: a misspelled field is refused, named, and nothing is created
+ ✓ unknownArguments.spec.ts > unknown arguments are refused and named (PAY-11) > find: a misspelled argument is refused and named
+ ✓ unknownArguments.spec.ts > unknown arguments are refused and named (PAY-11) > delete: an unknown argument is refused, named, and nothing is deleted
+ ✓ unknownArguments.spec.ts > unknown arguments are refused and named (PAY-11) > an unknown key inside an array row is refused and named with its path
+ ✓ unknownArguments.spec.ts > unknown arguments are refused and named (PAY-11) > every collection tool advertises that it takes no other arguments
+ ✓ unknownArguments.spec.ts > unknown arguments are refused and named (PAY-11) > calls with only known arguments still work
+      Tests  8 passed (8)
+== refusalReason before (code at 265fb7f fix(plugin-mcp): refuse and name unknown arguments on every )
+ × refusalReason.spec.ts > validation refusals carry the reason (PAY-13) > update by id: isError, the field and the reason
+ × refusalReason.spec.ts > validation refusals carry the reason (PAY-13) > create: isError, the field and the reason
+ ✓ refusalReason.spec.ts > validation refusals carry the reason (PAY-13) > an error without reasons is passed on as it was
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+      Tests  2 failed | 1 passed (3)
+== refusalReason after (code at 85fa21e fix(plugin-mcp): pass the reason of a validation refusal thr)
+ ✓ refusalReason.spec.ts > validation refusals carry the reason (PAY-13) > update by id: isError, the field and the reason
+ ✓ refusalReason.spec.ts > validation refusals carry the reason (PAY-13) > create: isError, the field and the reason
+ ✓ refusalReason.spec.ts > validation refusals carry the reason (PAY-13) > an error without reasons is passed on as it was
+      Tests  3 passed (3)
+== rowIds before, without the keepRowIds unit test (its helper does not exist yet) (code at 85fa21e fix(plugin-mcp): pass the reason of a validation refusal thr)
+ × rowIds.spec.ts > array row ids are stable when the same rows are sent again (MWS-ANN-3) > repeating an update of an array with the same rows keeps the row ids
+ × rowIds.spec.ts > array row ids are stable when the same rows are sent again (MWS-ANN-3) > a row whose values changed is a new row; an unchanged row at the same position keeps its id
+ ✓ rowIds.spec.ts > array row ids are stable when the same rows are sent again (MWS-ANN-3) > a row moved to another position does not take the id of the row stored there
+ ✓ rowIds.spec.ts > array row ids are stable when the same rows are sent again (MWS-ANN-3) > rows sent with their ids are written as sent, and an id is never given to two rows
+ ✓ rowIds.spec.ts > array row ids are stable when the same rows are sent again (MWS-ANN-3) > the same call sent twice (the same ifUpdatedAt) is refused the second time and changes nothing
+ ✓ rowIds.spec.ts > array row ids are stable when the same rows are sent again (MWS-ANN-3) > updatePosts still declares idempotentHint: true
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+      Tests  2 failed | 4 passed (6)
+== rowIds after (code at 8642af5 fix(plugin-mcp): keep array row ids when the same rows are s)
+ ✓ rowIds.spec.ts > array row ids are stable when the same rows are sent again (MWS-ANN-3) > repeating an update of an array with the same rows keeps the row ids
+ ✓ rowIds.spec.ts > array row ids are stable when the same rows are sent again (MWS-ANN-3) > a row whose values changed is a new row; an unchanged row at the same position keeps its id
+ ✓ rowIds.spec.ts > array row ids are stable when the same rows are sent again (MWS-ANN-3) > a row moved to another position does not take the id of the row stored there
+ ✓ rowIds.spec.ts > array row ids are stable when the same rows are sent again (MWS-ANN-3) > rows sent with their ids are written as sent, and an id is never given to two rows
+ ✓ rowIds.spec.ts > array row ids are stable when the same rows are sent again (MWS-ANN-3) > the same call sent twice (the same ifUpdatedAt) is refused the second time and changes nothing
+ ✓ rowIds.spec.ts > array row ids are stable when the same rows are sent again (MWS-ANN-3) > updatePosts still declares idempotentHint: true
+ ✓ rowIds.spec.ts > array row ids are stable when the same rows are sent again (MWS-ANN-3) > keepRowIds: blocks and nested arrays; a stored value the row leaves out must be empty
+      Tests  7 passed (7)

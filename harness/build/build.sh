@@ -9,15 +9,16 @@
 #                                                 transpile every .ts file the build changes against upstream-v3.93.0
 #                                                 (esbuild 0.25.12, ESM, no bundling) into OUT/<build>/dist and compare
 #                                                 the sha256 list with the measured build's list in results/builds/.
-#                                                 BUILD: v1, v2, v2.1 or all (default all)
-#   harness/build/build.sh app baseline|research|research-v2|research-v2-1
+#                                                 BUILD: v1, v2, v2.1, v2.2 or all (default all)
+#   harness/build/build.sh app baseline|research|research-v2|research-v2-1|research-v2-2
 #                                                 baseline: nothing to build (harness/app runs the npm package unmodified).
 #                                                 The others copy harness/app to harness/build/app-<name> and replace the
 #                                                 matching dist/*.js of its installed @payloadcms/plugin-mcp 3.93.0 with
 #                                                 the transpiled files (MCP_BUILD=<name> harness/sandbox/serve.sh)
 #
 # Builds: upstream = tag upstream-v3.93.0; v1 = research-v1-v3.93.0 (patches 0001-0005, the benchmarked build);
-# v2 = research-v2-v3.93.0 (+0006); v2.1 = research-v2.1-v3.93.0 (+0007; packages/plugin-mcp on main is v2.1).
+# v2 = research-v2-v3.93.0 (+0006); v2.1 = research-v2.1-v3.93.0 (+0007); v2.2 = research-v2.2-v3.93.0 (+0008-0011;
+# packages/plugin-mcp on main is v2.2). Until the v2.2 tag exists, v2.2 is checked against HEAD.
 # ESBUILD may point at an esbuild 0.25.12 binary; otherwise harness/app's copy is used (after `pnpm install` in
 # harness/app), then `npx esbuild@0.25.12`. Nothing here needs network access except pnpm/npx, and nothing writes outside
 # this repository, OUT and TMPDIR. The build tags must be present (`git fetch --tags` if the clone has none).
@@ -28,9 +29,11 @@ BASE_TAG=upstream-v3.93.0
 UPSTREAM_PLUGIN_TREE=d5843d4a9baf977379c6ec74694b17f51824b377   # payloadcms/payload 77425c50:packages/plugin-mcp
 UPSTREAM_LICENSE_BLOB=b31f1fb3a1fdfb07ea047b17323b864f8542224e  # payloadcms/payload 77425c50:LICENSE.md
 
-build_tag() { case "$1" in v1) echo research-v1-v3.93.0;; v2) echo research-v2-v3.93.0;; v2.1) echo research-v2.1-v3.93.0;; *) echo "unknown build $1 (v1, v2, v2.1)" >&2; exit 2;; esac; }
-build_list() { case "$1" in v1) echo "$REPO/results/builds/research-files.txt";; v2) echo "$REPO/results/builds/research-v2-files.txt";; v2.1) echo "$REPO/results/builds/research-v2-1-files.txt";; esac; }
-build_patches() { case "$1" in v1) echo "0001 0002 0003 0004 0005";; v2) echo "0006";; v2.1) echo "0007";; esac; }
+build_tag() { case "$1" in v1) echo research-v1-v3.93.0;; v2) echo research-v2-v3.93.0;; v2.1) echo research-v2.1-v3.93.0;;
+  v2.2) if git -C "$REPO" rev-parse -q --verify refs/tags/research-v2.2-v3.93.0 >/dev/null; then echo research-v2.2-v3.93.0; else echo HEAD; fi;;
+  *) echo "unknown build $1 (v1, v2, v2.1, v2.2)" >&2; exit 2;; esac; }
+build_list() { case "$1" in v1) echo "$REPO/results/builds/research-files.txt";; v2) echo "$REPO/results/builds/research-v2-files.txt";; v2.1) echo "$REPO/results/builds/research-v2-1-files.txt";; v2.2) echo "$REPO/results/builds/research-v2-2-files.txt";; esac; }
+build_patches() { case "$1" in v1) echo "0001 0002 0003 0004 0005";; v2) echo "0006";; v2.1) echo "0007";; v2.2) echo "0008 0009 0010 0011";; esac; }
 
 need_tags() {
   local t; for t in "$BASE_TAG" research-v1-v3.93.0 research-v2-v3.93.0 research-v2.1-v3.93.0; do
@@ -68,7 +71,7 @@ check_patches() {
   need_tags
   local wt b p got want fail=0
   wt="$(tmp_worktree "$BASE_TAG")"
-  for b in v1 v2 v2.1; do
+  for b in v1 v2 v2.1 v2.2; do
     for p in $(build_patches "$b"); do
       git -C "$wt" -c user.name=check -c user.email=check@example.invalid am -q "$REPO"/patches/"$p"-*.patch
     done
@@ -76,7 +79,7 @@ check_patches() {
     if [ "$got" = "$want" ]; then echo "OK: patches -> $b: tree $got = $(build_tag "$b")"; else echo "MISMATCH: patches -> $b: $got, tag $want" >&2; fail=1; fi
   done
   want="$(git -C "$REPO" rev-parse HEAD:packages/plugin-mcp)"
-  if [ "$got" = "$want" ]; then echo "OK: packages/plugin-mcp on HEAD = v2.1 ($want)"; else echo "MISMATCH: HEAD packages/plugin-mcp $want" >&2; fail=1; fi
+  if [ "$got" = "$want" ]; then echo "OK: packages/plugin-mcp on HEAD = v2.2 ($want)"; else echo "MISMATCH: HEAD packages/plugin-mcp $want" >&2; fail=1; fi
   git -C "$REPO" worktree remove --force "$wt"
   [ "$fail" = 0 ]
 }
@@ -86,7 +89,8 @@ transpile_one() { # $1 build (v1|v2|v2.1), $2 OUT root
   ref="$(build_tag "$b")"; measured="$(build_list "$b")"
   es="$(esbuild_cmd)"; mkdir -p "$out/dist"; list="$out/files.txt"; : > "$list"
   wt="$(tmp_worktree "$ref")"
-  for f in $(git -C "$REPO" diff --name-only "$BASE_TAG" "$ref" -- packages/plugin-mcp/src | grep '\.ts$' | grep -v '\.spec\.ts$' | sort); do
+  # Tests (*.spec.ts) and their fixtures (*.spec-utils.ts) are not part of a build.
+  for f in $(git -C "$REPO" diff --name-only "$BASE_TAG" "$ref" -- packages/plugin-mcp/src | grep '\.ts$' | grep -v -E '\.spec(-utils)?\.ts$' | sort); do
     rel="${f#packages/plugin-mcp/src/}"; o="$out/dist/${rel%.ts}.js"; mkdir -p "$(dirname "$o")"; rm -f "$o"
     # The upstream tsconfig extends a monorepo file that is not in this repository; esbuild warns and the output
     # is unaffected (the hashes match the measured build).
@@ -106,7 +110,7 @@ transpile_one() { # $1 build (v1|v2|v2.1), $2 OUT root
 transpile() { # $1 build or all, $2 OUT root
   need_tags
   local b fail=0
-  if [ "$1" = all ]; then for b in v1 v2 v2.1; do transpile_one "$b" "$2" || fail=1; done; else transpile_one "$1" "$2" || fail=1; fi
+  if [ "$1" = all ]; then for b in v1 v2 v2.1 v2.2; do transpile_one "$b" "$2" || fail=1; done; else transpile_one "$1" "$2" || fail=1; fi
   [ "$fail" = 0 ]
 }
 
@@ -133,7 +137,8 @@ case "${1:-}" in
          research) app_research v1 research ;;
          research-v2) app_research v2 research-v2 ;;
          research-v2-1) app_research v2.1 research-v2-1 ;;
-         *) echo "usage: build.sh app baseline|research|research-v2|research-v2-1" >&2; exit 2;;
+         research-v2-2) app_research v2.2 research-v2-2 ;;
+         *) echo "usage: build.sh app baseline|research|research-v2|research-v2-1|research-v2-2" >&2; exit 2;;
        esac ;;
-  *) sed -n '2,23p' "$0"; exit 2 ;;
+  *) sed -n '2,24p' "$0"; exit 2 ;;
 esac

@@ -22,6 +22,7 @@ disposable database.
 | `bench/` | `TASKS-A.md` (pre-registered set) and `TASKS-B.md` (friction-derived set) |
 | `probe/` | Probe definitions with REST control arms: `experiments/` (E1 to E8), `experiments/regression/` (re-run on research v1), `experiments/batching/` (E9 to E12 and the regression copies run on v2 and v2.1), `targets/` (one per build), the Payload adapter and the expected seed states |
 | `build/` | `build.sh` (use this), `build-research.sh` (the script that built the measured v1 build; needs bash 4 and a full Payload clone) |
+| `test/` | `run.sh`: the plugin's unit tests (`packages/plugin-mcp/src/**/*.spec.ts`, added with research v2.2) under vitest with pinned dependencies; no database |
 | `lib/stdio-bridge.mjs` | stdio to Streamable HTTP bridge, for clients that only launch stdio servers; it adds, drops and rewrites nothing |
 | `hypotheses/HYPOTHESES.md`, `CONFLICT-RECOVERY.md` | The pre-registered hypotheses, the conflict design |
 
@@ -70,7 +71,8 @@ MCP_BUILD=research harness/sandbox/serve.sh    # research v1 on 127.0.0.1:3094 (
 node harness/sandbox/seed.mjs                  # users, MCP key, seed content; prints the state hash
 ```
 
-`build.sh app research-v2` and `build.sh app research-v2-1` build v2 (port 3095) and v2.1 (port 3096) the same way.
+`build.sh app research-v2`, `build.sh app research-v2-1` and `build.sh app research-v2-2` build v2 (port 3095), v2.1
+(port 3096) and v2.2 (port 3097) the same way.
 All builds share one database. Run them one at a time and reseed before every run. `env.sh` points the scripts at port
 3093; set `PAYLOAD_URL=http://127.0.0.1:<port>` to seed and check through another server.
 
@@ -94,6 +96,7 @@ recorded `calls.jsonl` and ran `check.mjs`, exactly the steps above.
 
 ```sh
 harness/build/build.sh check-upstream   # the upstream tag is payloadcms/payload v3.93.0, unmodified
-harness/build/build.sh check-patches    # patches/ on the upstream tag reproduce the v1, v2 and v2.1 sources
-harness/build/build.sh transpile        # the transpiled files of all three builds match results/builds/
+harness/build/build.sh check-patches    # patches/ on the upstream tag reproduce the v1, v2, v2.1 and v2.2 sources
+harness/build/build.sh transpile        # the transpiled files of all four builds match results/builds/
+harness/test/run.sh                     # the unit tests of the v2.2 changes (vitest; npm ci on first run)
 ```

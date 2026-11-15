@@ -4,6 +4,7 @@
 #   MCP_BUILD=research sandbox/serve.sh   build/app-research/ (build/build-research.sh) on 127.0.0.1:3094
 #   MCP_BUILD=research-v2 sandbox/serve.sh   build/app-research-v2/ (build.sh app research-v2) on 127.0.0.1:3095
 #   MCP_BUILD=research-v2-1 sandbox/serve.sh build/app-research-v2-1/ (build.sh app research-v2-1) on 127.0.0.1:3096
+#   MCP_BUILD=research-v2-2 sandbox/serve.sh build/app-research-v2-2/ (build.sh app research-v2-2) on 127.0.0.1:3097
 # Both use the same Postgres; runs are sequential and every run reseeds.
 set -euo pipefail
 cd "$(dirname "$0")"; . ./env.sh
@@ -13,6 +14,7 @@ case "${MCP_BUILD:-baseline}" in
   research) cd ../build/app-research; PORT=3094 ;;
   research-v2) cd ../build/app-research-v2; PORT=3095 ;;
   research-v2-1) cd ../build/app-research-v2-1; PORT=3096 ;;
-  *) echo "MCP_BUILD must be baseline, research, research-v2 or research-v2-1" >&2; exit 2 ;;
+  research-v2-2) cd ../build/app-research-v2-2; PORT=3097 ;;
+  *) echo "MCP_BUILD must be baseline, research, research-v2, research-v2-1 or research-v2-2" >&2; exit 2 ;;
 esac
 exec node_modules/.bin/next dev -H 127.0.0.1 -p "$PORT"
