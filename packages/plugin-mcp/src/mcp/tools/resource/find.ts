@@ -4,7 +4,7 @@ import type { JoinQuery, PayloadRequest, PopulateType, SelectType, TypedUser } f
 import type { MCPPluginConfig } from '../../../types.js'
 
 import { toCamelCase } from '../../../utils/camelCase.js'
-import { rememberRead, stripAdded, versionSelect } from '../../helpers/writeSafety.js'
+import { versionSelect } from '../../helpers/writeSafety.js'
 import { toolSchemas } from '../schemas.js'
 
 export const findResourceTool = (
@@ -37,9 +37,8 @@ export const findResourceTool = (
     }>
   }> => {
     const payload = req.payload
-    // C-readversion with select (v2.1): always fetch the version fields the read-version memory needs.
-    const vs = versionSelect(select)
-    const querySelect = vs.select
+    // C-version with select (v2.1; v2.2): every answer carries updatedAt, the version a later write must send.
+    const querySelect = versionSelect(select)
 
     if (verboseLogs) {
       payload.logger.info(
@@ -90,8 +89,6 @@ export const findResourceTool = (
             ...(trash !== undefined && { trash }),
           })
 
-          rememberRead(user, collectionSlug, [doc])
-          stripAdded([doc], vs.added)
           if (verboseLogs) {
             payload.logger.info(`[payload-mcp] Found document with ID: ${id}`)
           }
@@ -163,8 +160,6 @@ ${JSON.stringify(doc)}`,
       }
 
       const result = await payload.find(findOptions)
-      rememberRead(user, collectionSlug, result.docs)
-      stripAdded(result.docs, vs.added)
 
       if (verboseLogs) {
         payload.logger.info(

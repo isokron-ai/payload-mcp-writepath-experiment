@@ -1,5 +1,7 @@
 import type { PayloadRequest, TypedUser } from 'payload'
 
+import { z } from 'zod'
+
 /**
  * Write-safety helpers for the collection tools (IsoKron research build, isokron-payload-mcp-2026-11).
  *
@@ -179,50 +181,58 @@ export const OPERATION_ARGS = [
 ]
 
 /**
- * C-readversion: the version each user last read, per document (and per document incarnation: createdAt, so a
- * re-created document with the same id starts clean). An update or delete by id with no ifUpdatedAt uses it as the
- * precondition: if the document changed since this user last read or wrote it, the write is refused as stale.
- * In-process memory only (the MCP transport is stateless); best-effort, like ifUpdatedAt.
+ * C-version (research v2.2, PAY-09): the version precondition is per write. Every update and delete carries the version
+ * its change is based on (ifUpdatedAt: the document's updatedAt as the caller read it, or as its last write receipt
+ * gave it). A write whose version is no longer current is refused, whoever sends it: another user, another client, or
+ * another session using the same key. Research v1 to v2.1 used the version the server remembered per user when
+ * ifUpdatedAt was left out; two clients sharing one key refreshed each other's memory, so a stale write went through.
+ * Collections without timestamps have no version to send; their writes are not checked. Best-effort: the check reads
+ * the document, then writes, so a change landing between the two is not detected.
  */
-const lastSeen = new Map<string, string>()
-const seenKey = (userId: unknown, collectionSlug: string, id: unknown, createdAt: unknown) =>
-  `${String(userId)}|${collectionSlug}|${String(id)}|${String(createdAt)}`
+export const versionRequired = (req: PayloadRequest, collectionSlug: string): boolean =>
+  (req.payload.collections?.[collectionSlug as never] as { config?: { timestamps?: boolean } } | undefined)?.config
+    ?.timestamps !== false
 
-export function rememberRead(user: TypedUser | undefined, collectionSlug: string, docs: unknown[]): void {
-  if (!user) {
-    return
-  }
-  for (const d of docs) {
-    const doc = d as { createdAt?: string; id?: unknown; updatedAt?: string }
-    if (doc && doc.id !== undefined && doc.updatedAt) {
-      lastSeen.set(seenKey(user.id, collectionSlug, doc.id, doc.createdAt), doc.updatedAt)
-    }
-  }
+/** A write by id that carries no version: refused, with the current document so the change can be re-applied to it. */
+export function missingVersion(args: {
+  action: 'delete' | 'update'
+  collectionSlug: string
+  currentDoc: null | Record<string, unknown>
+  id: number | string
+  readTool: string
+}): ToolResponse {
+  const { action, collectionSlug, currentDoc, id, readTool } = args
+  const current = (currentDoc?.updatedAt as string | undefined) ?? null
+  const structured = { conflict: 'no_version', collection: collectionSlug, id, documentUpdatedAt: current, applied: false, currentDocument: currentDoc }
+  return errorResponse(
+    `Refused: ${action === 'delete' ? 'a delete' : 'an update'} needs ifUpdatedAt, the updatedAt of the version your change is based on ` +
+      `(${readTool} answers carry it, and so does the receipt of your last write). Your ${action} was NOT applied. ` +
+      `The current document is below (currentDocument): ${action === 'delete' ? 'check it' : 're-apply only your own change to it'} ` +
+      `and retry with ifUpdatedAt ${current ?? '<its updatedAt>'}.\n` +
+      JSON.stringify(structured),
+  )
 }
 
-export async function readVersionCheck(args: {
-  collectionSlug: string
-  id: number | string
-  req: PayloadRequest
-  user: TypedUser
-}): Promise<{ current: null | string; seen: string } | null> {
-  try {
-    const doc = (await args.req.payload.findByID({
-      id: args.id,
-      collection: args.collectionSlug,
-      depth: 0,
-      draft: true,
-      overrideAccess: false,
-      user: args.user,
-    })) as { createdAt?: string; updatedAt?: string }
-    const seen = lastSeen.get(seenKey(args.user?.id, args.collectionSlug, args.id, doc?.createdAt))
-    if (seen && doc?.updatedAt && seen !== doc.updatedAt) {
-      return { current: doc.updatedAt, seen }
-    }
-  } catch {
-    // a missing document is reported by the write itself
-  }
-  return null
+/**
+ * The ifUpdatedAt argument of update and delete. Required (in the advertised schema too) when the collection has
+ * versions; the message of a call without it names the argument and says what to send.
+ */
+export function versionArg(versioned: boolean, action: 'delete' | 'update') {
+  const verb = action === 'delete' ? 'deleted' : 'written'
+  const arg = z
+    .union([z.string(), z.record(z.string(), z.string())], {
+      required_error:
+        `Nothing was ${action === 'delete' ? 'deleted' : 'changed'}: send the updatedAt of the version your ${action} is based on ` +
+        `(find answers and write receipts carry it; a map {"<id>": "<updatedAt>"} for several documents); it is required`,
+    })
+    .describe(
+      `Required: the version your ${action} is based on (updatedAt, from a find answer or your last write receipt). With id: that updatedAt string. ` +
+        `For several documents: a map {"<id>": "<updatedAt>"} (it selects those ids; with where, every match must be in it). ` +
+        `A document changed since that version is not ${verb}, whoever changed it; you get its current version`,
+    )
+  return versioned
+    ? arg
+    : arg.optional().describe('This collection keeps no versions (timestamps are off), so writes cannot be checked; leave it out')
 }
 
 /** ifUpdatedAt as a per-document version map (bulk calls): {"<id>": "<updatedAt>"}. */
@@ -236,20 +246,20 @@ export const idsOf = (versions: VersionMap): Array<number | string> =>
   Object.keys(versions).map((k) => (/^\d+$/.test(k) ? Number(k) : k))
 
 export type BulkRefusal = {
-  conflict: 'stale'
+  conflict: 'no_version' | 'stale'
   currentDocument: null | Record<string, unknown>
   documentUpdatedAt: null | string
   id: unknown
-  ifUpdatedAt: string
+  ifUpdatedAt: null | string
   ok: false
-  precondition: 'ifUpdatedAt' | 'last_read'
 }
 
 /**
- * C-bulk-versions (research v2): per-document preconditions for a where-based update or delete. Every matching
- * document is checked against the version pinned for it in `versions` (ifUpdatedAt map) or, when none is pinned,
- * against the version this user last read (C-readversion), exactly as a write by id is. Documents that changed are
- * refused (with their current state); the rest may be written. Best-effort (read, then write), like the by-id check.
+ * C-bulk-versions (research v2; per write since v2.2): per-document preconditions for a where-based update or delete.
+ * Every matching document is checked against the version the caller pinned for it in `versions` (the ifUpdatedAt
+ * map). A document that changed since that version is refused as "stale", and one the map does not name is refused as
+ * "no_version" (both with their current state); the rest may be written. Without a map (`versions` undefined, only for a
+ * collection that keeps no versions) nothing is checked.
  */
 export async function bulkPreflight(args: {
   collectionSlug: string
@@ -267,22 +277,16 @@ export async function bulkPreflight(args: {
     pagination: false,
     user,
     where: where as never,
-  })) as unknown as { docs: Array<Record<string, unknown> & { createdAt?: string; id: number | string; updatedAt?: string }> }
+  })) as unknown as { docs: Array<Record<string, unknown> & { id: number | string; updatedAt?: string }> }
   const allowed: Array<number | string> = []
   const refused: BulkRefusal[] = []
   for (const doc of docs) {
     const pinned = versions?.[String(doc.id)]
-    const expected = pinned ?? lastSeen.get(seenKey(user?.id, collectionSlug, doc.id, doc.createdAt))
-    if (expected && doc.updatedAt && expected !== doc.updatedAt) {
-      refused.push({
-        id: doc.id,
-        conflict: 'stale',
-        currentDocument: doc,
-        documentUpdatedAt: doc.updatedAt,
-        ifUpdatedAt: expected,
-        ok: false,
-        precondition: pinned ? 'ifUpdatedAt' : 'last_read',
-      })
+    const now = doc.updatedAt ?? null
+    if (versions && pinned === undefined) {
+      refused.push({ id: doc.id, conflict: 'no_version', currentDocument: doc, documentUpdatedAt: now, ifUpdatedAt: null, ok: false })
+    } else if (pinned !== undefined && now && pinned !== now) {
+      refused.push({ id: doc.id, conflict: 'stale', currentDocument: doc, documentUpdatedAt: now, ifUpdatedAt: pinned, ok: false })
     } else {
       allowed.push(doc.id)
     }
@@ -319,11 +323,17 @@ export function bulkAnswer(args: {
     action === 'deleted'
       ? `check them; if they should still be deleted, retry those ids in one call with ifUpdatedAt ${JSON.stringify(pins)}`
       : `re-apply only your change to those ids and retry them in one call with ifUpdatedAt ${JSON.stringify(pins)}`
-  const staleText = refused.length
-    ? `${refused.length} changed since you read them (conflict "stale"; currentDocument shows each one now): ${next}, or re-read them with ${readTool}`
+  const stale = refused.filter((r) => r.conflict === 'stale').length
+  const noVersion = refused.length - stale
+  const staleText = stale
+    ? `${stale} changed since you read them (conflict "stale"; currentDocument shows each one now)`
     : ''
+  const noVersionText = noVersion
+    ? `${noVersion} matched your where but had no version in ifUpdatedAt (conflict "no_version"; currentDocument shows each one now)`
+    : ''
+  const retryText = refused.length ? `for those: ${next}, or re-read them with ${readTool}` : ''
   const errText = errors.length ? `${errors.length} failed (see error)` : ''
-  const why = [staleText, errText].filter(Boolean).join('; ')
+  const why = [staleText, noVersionText, retryText, errText].filter(Boolean).join('; ')
   let head: string
   if (notChanged === 0) {
     head = `${action === 'deleted' ? 'Deleted' : 'Updated'} ${applied.length} document(s) ${action === 'deleted' ? 'from' : 'in'} "${collectionSlug}".`
@@ -344,42 +354,20 @@ export function bulkAnswer(args: {
 }
 
 /**
- * C-readversion with select (research v2.1): the read-version memory needs each document's updatedAt and createdAt.
- * A find with an inclusion select that leaves them out (e.g. {title, items, updatedAt}) used to record nothing usable,
- * so the next write by that user had no precondition. The query asks for both; the answer is unchanged (the fields
- * the agent did not ask for are removed again before the document is shown).
+ * C-version with select (research v2.1; v2.2): a find with an inclusion select that leaves out updatedAt (e.g.
+ * {title, items}) would give the caller no version to send with its next write. The query always asks for updatedAt,
+ * and the answer keeps it (v2.1 removed it again; with a per-write precondition the caller needs it).
  */
-const VERSION_FIELDS = ['createdAt', 'updatedAt']
-
-export function versionSelect(select?: Record<string, unknown>): { added: string[]; select?: Record<string, unknown> } {
+export function versionSelect(select?: Record<string, unknown>): Record<string, unknown> | undefined {
   if (!select || typeof select !== 'object' || Object.keys(select).length === 0) {
-    return { added: [], select }
+    return select
   }
   const inclusion = Object.values(select).some((v) => v !== false)
   const out: Record<string, unknown> = { ...select }
-  const added: string[] = []
-  for (const f of VERSION_FIELDS) {
-    if (inclusion && out[f] !== true) {
-      out[f] = true
-      added.push(f)
-    } else if (!inclusion && out[f] === false) {
-      delete out[f]
-      added.push(f)
-    }
+  if (inclusion) {
+    out.updatedAt = true
+  } else if (out.updatedAt === false) {
+    delete out.updatedAt
   }
-  return { added, select: out }
-}
-
-export function stripAdded<T>(docs: T[], added: string[]): T[] {
-  if (!added.length) {
-    return docs
-  }
-  for (const d of docs) {
-    if (d && typeof d === 'object') {
-      for (const f of added) {
-        delete (d as Record<string, unknown>)[f]
-      }
-    }
-  }
-  return docs
+  return out
 }
