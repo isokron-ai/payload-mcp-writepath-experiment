@@ -13,7 +13,7 @@ import {
 } from '../../../utils/getVirtualFieldNames.js'
 import { convertCollectionSchemaToZod } from '../../../utils/schemaConversion/convertCollectionSchemaToZod.js'
 import { transformPointDataToPayload } from '../../../utils/transformPointDataToPayload.js'
-import { errorResponse, OPERATION_ARGS, receipt } from '../../helpers/writeSafety.js'
+import { errorResponse, errorText, OPERATION_ARGS, receipt } from '../../helpers/writeSafety.js'
 import { strictArgs } from '../../helpers/strictArgs.js'
 import { toolSchemas } from '../schemas.js'
 export const createResourceTool = (
@@ -112,7 +112,7 @@ ${JSON.stringify(result)}
         }>
       }
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+      const errorMessage = errorText(error)
       payload.logger.error(
         `[payload-mcp] Error creating resource in ${collectionSlug}: ${errorMessage}`,
       )
