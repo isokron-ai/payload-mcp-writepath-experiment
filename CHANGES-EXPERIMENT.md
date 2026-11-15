@@ -52,7 +52,9 @@ holds the fixes from a second review of those four. Each fix has unit tests that
 the code before it and pass after (`harness/test/run.sh`; "Tests" below), and was checked by hand against a running
 app with v2.1 and then v2.2 swapped in (raw JSON-RPC and REST, the same app and seed as the run; "Measured"). Scripts
 and outputs: [`results/v2-2/`](results/v2-2/) (`hand-checks-v2-1.mjs` sends no versions, as clients of v2.1 did;
-`hand-checks-v2-2.mjs` sends them).
+`hand-checks-v2-2.mjs` sends them). The hand checks ran on v2.2 as of commit 11; commit 12's review fixes change
+edge cases only (an unreadable document, collections without timestamps, json fields, fallback locales, suggestions)
+and are covered by unit tests. A hand re-run on the final build is still to do.
 
 | Change | v2.1 did | v2.2 does | Measured |
 | --- | --- | --- | --- |

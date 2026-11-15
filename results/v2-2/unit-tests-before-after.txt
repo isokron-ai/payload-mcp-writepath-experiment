@@ -73,3 +73,10 @@
  ✓ rowIds.spec.ts > array row ids are stable when the same rows are sent again (MWS-ANN-3) > updatePosts still declares idempotentHint: true
  ✓ rowIds.spec.ts > array row ids are stable when the same rows are sent again (MWS-ANN-3) > keepRowIds: blocks and nested arrays; a stored value the row leaves out must be empty
       Tests  7 passed (7)
+== review fixes (commit 12): the 4 new tests on the code before it (code at fbfde68)
+ × rowIds.spec.ts > array row ids are stable when the same rows are sent again (MWS-ANN-3) > keepRowIds: a json field is left as sent, and an id sent anywhere is not filled in again
+ × unknownArguments.spec.ts > unknown arguments are refused and named (PAY-11) > never suggests an argument that widens a write, and gives no suggestion for very short names
+ × versionPrecondition.spec.ts > per-write version precondition (PAY-09) > a write without a usable version is refused even when the current document cannot be read
+ × versionPrecondition.spec.ts > per-write version precondition (PAY-09) > a collection without timestamps does not check or require ifUpdatedAt
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 4 ⎯⎯⎯⎯⎯⎯⎯
+      Tests  4 failed | 29 passed (33)
