@@ -14,6 +14,7 @@ import {
 import { convertCollectionSchemaToZod } from '../../../utils/schemaConversion/convertCollectionSchemaToZod.js'
 import { transformPointDataToPayload } from '../../../utils/transformPointDataToPayload.js'
 import { errorResponse, OPERATION_ARGS, receipt } from '../../helpers/writeSafety.js'
+import { strictArgs } from '../../helpers/strictArgs.js'
 import { toolSchemas } from '../schemas.js'
 export const createResourceTool = (
   server: McpServer,
@@ -134,12 +135,13 @@ ${JSON.stringify(result)}
     // C-args: fields named like an operation argument are written through `data` only.
     const shape = convertedFields.shape as Record<string, z.ZodTypeAny>
     const colliding = Object.keys(shape).filter((k) => OPERATION_ARGS.includes(k))
-    const createResourceSchema = z.object({
+    // C-strict-args (v2.2): an argument the schema does not name is refused and named, never dropped.
+    const name = `create${collectionSlug.charAt(0).toUpperCase() + toCamelCase(collectionSlug).slice(1)}`
+    const createResourceSchema = strictArgs({
       ...Object.fromEntries(Object.entries(shape).filter(([k]) => !OPERATION_ARGS.includes(k))),
       ...(colliding.length
         ? {
-            data: z
-              .object(Object.fromEntries(colliding.map((k) => [k, shape[k]!])))
+            data: strictArgs(Object.fromEntries(colliding.map((k) => [k, shape[k]!])), `${name} (in data)`)
               .partial()
               .optional()
               .describe(`Document fields named ${colliding.join(', ')}: write them here (the top-level names are operation arguments).`),
@@ -175,14 +177,14 @@ ${JSON.stringify(result)}
         .describe(
           "Optional: define exactly which fields you'd like to return in the response, e.g., {\"title\": true}",
         ),
-    })
+    }, name)
 
     server.registerTool(
-      `create${collectionSlug.charAt(0).toUpperCase() + toCamelCase(collectionSlug).slice(1)}`,
+      name,
       {
         annotations: { destructiveHint: false, idempotentHint: false, openWorldHint: false, readOnlyHint: false },
         description: `${collections?.[collectionSlug]?.description || toolSchemas.createResource.description.trim()}`,
-        inputSchema: createResourceSchema.shape,
+        inputSchema: createResourceSchema,
       },
       async (params: Record<string, unknown>) => {
         const { data: nested, depth, draft, fallbackLocale, locale, returnDocument, select, ...fieldData } = params

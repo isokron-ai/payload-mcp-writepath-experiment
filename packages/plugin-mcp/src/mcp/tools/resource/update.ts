@@ -33,6 +33,7 @@ import {
   versionArg,
   versionRequired,
 } from '../../helpers/writeSafety.js'
+import { strictArgs } from '../../helpers/strictArgs.js'
 import { toolSchemas } from '../schemas.js'
 
 const toolName = (slug: string, verb: string) =>
@@ -212,7 +213,9 @@ export const updateResourceTool = (
     const flatFields = Object.fromEntries(Object.entries(fieldShape).filter(([k]) => !OPERATION_ARGS.includes(k)))
     const colliding = Object.keys(fieldShape).filter((k) => OPERATION_ARGS.includes(k))
 
-    const updateResourceSchema = z.object({
+    // C-strict-args (v2.2): an argument the schema does not name is refused and named, never dropped.
+    const name = toolName(collectionSlug, 'update')
+    const updateResourceSchema = strictArgs({
       ...flatFields,
       all: z
         .boolean()
@@ -221,8 +224,7 @@ export const updateResourceTool = (
         .describe('Required to update every document with an empty where clause'),
       ...(colliding.length
         ? {
-            data: z
-              .object(Object.fromEntries(colliding.map((k) => [k, fieldShape[k]!])))
+            data: strictArgs(Object.fromEntries(colliding.map((k) => [k, fieldShape[k]!])), `${name} (in data)`)
               .partial()
               .optional()
               .describe(`Document fields named ${colliding.join(', ')}: write them here (the top-level names are operation arguments).`),
@@ -257,14 +259,14 @@ export const updateResourceTool = (
         .optional()
         .describe("Optional: define exactly which fields you'd like to return in the response, e.g., {\"title\": true}"),
       where: z.string().optional().describe('JSON string for where clause to update multiple documents in one call, e.g. {"id":{"in":[1,2]}}'),
-    })
+    }, name)
 
     server.registerTool(
-      toolName(collectionSlug, 'update'),
+      name,
       {
         annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: false, readOnlyHint: false },
         description: `${collections?.[collectionSlug]?.description || toolSchemas.updateResource.description.trim()}`,
-        inputSchema: updateResourceSchema.shape,
+        inputSchema: updateResourceSchema,
       },
       async (params: Record<string, unknown>) => {
         const {
