@@ -24,13 +24,14 @@ import {
   isVersionMap,
   lockConflict,
   lockInfo,
+  missingVersion,
   OPERATION_ARGS,
-  readVersionCheck,
   receipt,
-  rememberRead,
   staleConflict,
   type ToolResponse,
   type VersionMap,
+  versionArg,
+  versionRequired,
 } from '../../helpers/writeSafety.js'
 import { toolSchemas } from '../schemas.js'
 
@@ -84,10 +85,11 @@ export const updateResourceTool = (
     if (id === undefined && typeof o.ifUpdatedAt === 'string') {
       return out(
         errorResponse(
-          'Error: ifUpdatedAt as a single value pins one document (use it with id). For a bulk call pass a map {"<id>": "<updatedAt>"}, or leave it out: each document is checked against the version you last read. Nothing was changed.',
+          'Error: ifUpdatedAt as a single value is the version of one document (use it with id). For a bulk call pass a map {"<id>": "<updatedAt>"} with the version of each document you read. Nothing was changed.',
         ),
       )
     }
+    const checked = versionRequired(req, collectionSlug)
 
     let whereClause: Record<string, unknown> = {}
     if (id === undefined && where) {
@@ -111,18 +113,18 @@ export const updateResourceTool = (
 
     try {
       if (id !== undefined) {
-        // C-conflict: optional precondition on the version the agent read.
+        // C-version (v2.2): the write carries the version it is based on; a write without one is refused.
         if (pin) {
           const current = await currentUpdatedAt({ collectionSlug, id, req, user })
           if (current !== pin) {
             return out(staleConflict({ action: 'update', collectionSlug, current, currentDoc: await currentDocument({ collectionSlug, id, req, user }), id, readTool, sent: pin }))
           }
-        } else {
-          // C-readversion: no explicit precondition: the version this user last read is the precondition.
-          const stale = await readVersionCheck({ collectionSlug, id, req, user })
-          if (stale) {
-            return out(staleConflict({ action: 'update', collectionSlug, current: stale.current, currentDoc: await currentDocument({ collectionSlug, id, req, user }), id, readTool, sent: stale.seen }))
+        } else if (checked) {
+          const currentDoc = await currentDocument({ collectionSlug, id, req, user })
+          if (currentDoc) {
+            return out(missingVersion({ action: 'update', collectionSlug, currentDoc, id, readTool }))
           }
+          // a missing document is reported by the write itself
         }
         const result = await payload.update({
           id,
@@ -139,7 +141,6 @@ export const updateResourceTool = (
           ...(o.select && { select: o.select as SelectType }),
         } as never)
         const doc = result as unknown as Record<string, unknown>
-        rememberRead(user, collectionSlug, [doc])
         if (o.returnDocument || o.select) {
           return out(
             {
@@ -156,9 +157,12 @@ export const updateResourceTool = (
         return out(receipt({ action: 'updated', collectionSlug, doc, written }), result)
       }
 
-      // Bulk (v2): per-document preconditions (pinned in the ifUpdatedAt map, else the version this user last read);
-      // stale documents are refused with their current state, the rest are updated; per-document results, isError
+      // Bulk (v2; v2.2): per-document preconditions from the ifUpdatedAt map, which the call must carry; stale and
+      // unnamed documents are refused with their current state, the rest are updated; per-document results, isError
       // when any document was not changed (C-bulk, best-effort).
+      if (checked && !versions) {
+        return out(errorResponse('Error: a bulk update needs ifUpdatedAt as a map {"<id>": "<updatedAt>"} with the version of each document you read. Nothing was changed.'))
+      }
       const pre = await bulkPreflight({ collectionSlug, req, user, versions, where: whereClause })
       let docs: Record<string, unknown>[] = []
       let errors: { id?: unknown; message?: string }[] = []
@@ -186,7 +190,6 @@ export const updateResourceTool = (
           }
         }
       }
-      rememberRead(user, collectionSlug, docs)
       return out(
         bulkAnswer({ action: 'updated', applied: docs, collectionSlug, errors, readTool, refused: pre.refused, returnDocument: o.returnDocument, unmatchedPins: pre.unmatchedPins }),
         { docs, errors, refused: pre.refused },
@@ -232,12 +235,7 @@ export const updateResourceTool = (
         .optional()
         .describe('Optional: fallback locale code to use when requested locale is not available'),
       id: z.union([z.string(), z.number()]).optional().describe('The ID of the document to update'),
-      ifUpdatedAt: z
-        .union([z.string(), z.record(z.string(), z.string())])
-        .optional()
-        .describe(
-          'Optional pin; without it each document is checked against the version you last read. With id: the updatedAt string. With where: a map {"<id>": "<updatedAt>"}. A changed document is not written; you get its current version',
-        ),
+      ifUpdatedAt: versionArg(versionRequired(req, collectionSlug), 'update'),
       locale: z
         .string()
         .optional()

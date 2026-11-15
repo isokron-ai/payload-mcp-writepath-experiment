@@ -17,11 +17,13 @@ import {
   isVersionMap,
   lockConflict,
   lockInfo,
-  readVersionCheck,
+  missingVersion,
   receipt,
   staleConflict,
   type ToolResponse,
   type VersionMap,
+  versionArg,
+  versionRequired,
 } from '../../helpers/writeSafety.js'
 import { toolSchemas } from '../schemas.js'
 
@@ -63,10 +65,11 @@ export const deleteResourceTool = (
     if (id === undefined && typeof o.ifUpdatedAt === 'string') {
       return out(
         errorResponse(
-          'Error: ifUpdatedAt as a single value pins one document (use it with id). For a bulk call pass a map {"<id>": "<updatedAt>"}, or leave it out: each document is checked against the version you last read. Nothing was deleted.',
+          'Error: ifUpdatedAt as a single value is the version of one document (use it with id). For a bulk call pass a map {"<id>": "<updatedAt>"} with the version of each document you read. Nothing was deleted.',
         ),
       )
     }
+    const checked = versionRequired(req, collectionSlug)
     const pin = typeof o.ifUpdatedAt === 'string' ? o.ifUpdatedAt : id !== undefined ? versions?.[String(id)] : undefined
     const deleteOptions: Record<string, unknown> = {
       collection: collectionSlug,
@@ -105,10 +108,11 @@ export const deleteResourceTool = (
           if (current !== pin) {
             return out(staleConflict({ action: 'delete', collectionSlug, current, currentDoc: await currentDocument({ collectionSlug, id, req, user }), id, readTool, sent: pin }))
           }
-        } else {
-          const stale = await readVersionCheck({ collectionSlug, id, req, user })
-          if (stale) {
-            return out(staleConflict({ action: 'delete', collectionSlug, current: stale.current, currentDoc: await currentDocument({ collectionSlug, id, req, user }), id, readTool, sent: stale.seen }))
+        } else if (checked) {
+          // C-version (v2.2): a delete without the version it is based on is refused.
+          const currentDoc = await currentDocument({ collectionSlug, id, req, user })
+          if (currentDoc) {
+            return out(missingVersion({ action: 'delete', collectionSlug, currentDoc, id, readTool }))
           }
         }
         const result = (await payload.delete(deleteOptions as never)) as unknown as Record<string, unknown>
@@ -127,9 +131,12 @@ export const deleteResourceTool = (
         }
         return out(receipt({ action: 'deleted', collectionSlug, doc: result }), result)
       }
-      // Bulk (v2): every matching document is checked against its pinned or last-read version first; the stale ones
-      // are refused with their current state, the rest are deleted (best-effort, per document).
+      // Bulk (v2; v2.2): every matching document is checked against the version pinned for it in the ifUpdatedAt map
+      // first; stale and unnamed ones are refused with their current state, the rest are deleted (best-effort).
       const whereClause = deleteOptions.where as Record<string, unknown>
+      if (checked && !versions) {
+        return out(errorResponse('Error: a bulk delete needs ifUpdatedAt as a map {"<id>": "<updatedAt>"} with the version of each document you read. Nothing was deleted.'))
+      }
       const pre = await bulkPreflight({ collectionSlug, req, user, versions, where: whereClause })
       let docs: Record<string, unknown>[] = []
       let errors: { id?: unknown; message?: string }[] = []
@@ -166,12 +173,7 @@ export const deleteResourceTool = (
     const deleteSchema = z.object({
       ...toolSchemas.deleteResource.parameters.shape,
       all: z.boolean().optional().default(false).describe('Required to delete every document with an empty where clause'),
-      ifUpdatedAt: z
-        .union([z.string(), z.record(z.string(), z.string())])
-        .optional()
-        .describe(
-          'Optional pin; without it each document is checked against the version you last read. With id: the updatedAt string. With where: a map {"<id>": "<updatedAt>"}. A changed document is not deleted',
-        ),
+      ifUpdatedAt: versionArg(versionRequired(req, collectionSlug), 'delete'),
       overrideLock: z
         .boolean()
         .optional()
